@@ -12,6 +12,7 @@ By default, `bw-claude` provides a secure sandbox with restricted access:
   - `.local/share`, `.local/bin` - Application data and user binaries
   - `Documents`, `Downloads`, `Projects` - User files
   - `.viminfo` - Vim history and settings
+  - `.gitconfig` - Git configuration
   - **Development tools**:
     - `.cargo`, `.rustup` - Rust toolchain
     - `.npm` - npm cache/config
@@ -100,6 +101,14 @@ Mount additional paths into the sandbox (read-only or read-write). Can be specif
 
 # With explicit Claude argument separator
 ./bw-claude --allow-ro /var/log -- code myfile.py
+```
+
+### `--no-skip-permissions`
+By default, `--allow-dangerously-skip-permissions` is passed to Claude to allow it to operate without permission errors in the sandbox. Use this flag to disable that behavior:
+
+```bash
+# Run without --allow-dangerously-skip-permissions
+./bw-claude --no-skip-permissions code myfile.py
 ```
 
 **Notes:**
@@ -233,6 +242,7 @@ Read-Only (Safe Directories):
   $HOME/Downloads      -> $HOME/Downloads
   $HOME/Projects       -> $HOME/Projects
   $HOME/.viminfo       -> $HOME/.viminfo
+  $HOME/.gitconfig     -> $HOME/.gitconfig
   $HOME/.cargo         -> $HOME/.cargo
   $HOME/.rustup        -> $HOME/.rustup
   $HOME/.npm           -> $HOME/.npm

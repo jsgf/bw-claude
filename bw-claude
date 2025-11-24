@@ -42,6 +42,7 @@ SAFE_HOME_DIRS = [
     ".nvm",                 # Node Version Manager
     ".go",                  # Go workspace
     ".viminfo",             # Vim history and settings
+    ".gitconfig",           # Git configuration
 ]
 
 # Directories to explicitly exclude (even in unsafe-allow mode)
@@ -212,6 +213,9 @@ def build_bwrap_command(claude_path, args):
         cmd.append("-i")
     else:
         cmd.append(claude_path)
+        # Add --allow-dangerously-skip-permissions by default
+        if not args.no_skip_permissions:
+            cmd.append("--allow-dangerously-skip-permissions")
         cmd.extend(args.claude_args)
 
     # Mount additional paths (--allow-ro and --allow-rw)
@@ -295,6 +299,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--no-skip-permissions",
+        action="store_true",
+        help="Disable --allow-dangerously-skip-permissions for Claude (default: enabled)",
+    )
+
+    parser.add_argument(
         "--help",
         "-h",
         action="store_true",
@@ -316,6 +326,9 @@ def parse_args():
 
     if args.help:
         parser.print_help()
+        print("\nClaude options:")
+        print("  By default, --allow-dangerously-skip-permissions is passed to Claude.")
+        print("  Use --no-skip-permissions to disable this behavior.")
         print("\nClaude arguments are passed through unchanged.")
         print("Use -- to explicitly separate bw-claude options from Claude options:")
         print("  ./bw-claude --no-network -- code myfile.py")
