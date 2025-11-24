@@ -12,12 +12,13 @@ from pathlib import Path
 import tempfile
 
 # Directories safe to mount from home when using safe mode (default)
+# NOTE: Documents and Downloads are NOT included by default as they often
+# contain sensitive personal files (financial records, health data, etc.)
+# Use --allow-ro to explicitly grant access if needed
 SAFE_HOME_DIRS = [
     ".local/share",
     ".local/bin",           # User-installed binaries
-    "Documents",
-    "Downloads",
-    "Projects",
+    "Projects",             # Development projects (assumed safe)
     ".cargo",               # Rust package manager
     ".rustup",              # Rust toolchain manager
     ".npm",                 # npm cache/config
@@ -123,7 +124,10 @@ def build_bwrap_command(cli_path, args, tool_config, target_dir=None):
 
     cmd = ["bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc"]
 
-    if not args.no_network:
+    # Network namespace: explicitly share or unshare
+    if args.no_network:
+        cmd.extend(["--unshare-net"])
+    else:
         cmd.extend(["--share-net"])
 
     # Mount an isolated /tmp
