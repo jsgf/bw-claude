@@ -2,6 +2,12 @@
 
 ## Planned Features
 
+### Generalize for other llms
+- First target: gemini
+- Refactor bw-claude so that as much code as possible is shared
+- End up with bw-claude and bw-gemini
+- As much feature parity as possible
+
 ### Overlayfs Snapshotting
 - Implement copy-on-write filesystem for writable directories
 - Allow capturing, inspecting, and selectively applying changes
@@ -25,11 +31,8 @@
 - Option to completely hide directories
 - Environment variable overrides
 
-### Security Enhancements
-- Seccomp filter profiles (restrict system calls)
-- Capability limiting
-- Resource limits (memory, CPU)
-- Filesystem quotas
+## MCP
+- Extend for MCP? Agents? Other things?
 
 ### Logging and Auditing
 - Log filesystem access (read/write operations)
@@ -63,6 +66,7 @@
   > since libmount from util-linux v2.39 by a new experimental "recursive"
   > option argument (e.g. -o rbind,ro=recursive). For more details see the
   > FILESYSTEM-INDEPENDENT MOUNT OPTIONS section.
+- Use --bind-try to handle non-existent src dirs?
 
 ## Style
 - consistent about using pathlib?

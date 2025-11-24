@@ -1,138 +1,13 @@
 #!/usr/bin/env python3
 """
 Bubblewrap sandboxing wrapper for Claude CLI.
-
-Provides a sandboxed execution environment for Claude with controlled access.
-
-Default configuration (safe mode):
-- Safe home directories (.local/share, Documents, Downloads, Projects, development tools)
-- Safe .config subdirectories only (git, nvim, etc. - browsers excluded to protect cookies)
-- System binaries and libraries (read-only)
-- Isolated /tmp for state transfer (read-write)
-- ~/.claude read-write (Claude state)
-- Network access enabled
-
-Security options:
-- --no-network: Disable network access
-- --full-home-access: Allow full home directory access (unsafe, includes browser credentials)
 """
 
-import os
 import sys
-import argparse
-import subprocess
-import tempfile
-import uuid
-import shutil
-import json
+import os
 from pathlib import Path
-
-
-# Directories safe to mount from home when using safe mode (default)
-SAFE_HOME_DIRS = [
-    ".local/share",
-    ".local/bin",           # User-installed binaries
-    "Documents",
-    "Downloads",
-    "Projects",
-    ".cargo",               # Rust package manager
-    ".rustup",              # Rust toolchain manager
-    ".npm",                 # npm cache/config
-    ".gem",                 # Ruby gems
-    ".gradle",              # Gradle (Java/Kotlin builds)
-    ".m2",                  # Maven (Java builds)
-    ".nvm",                 # Node Version Manager
-    ".go",                  # Go workspace
-    ".viminfo",             # Vim history and settings
-    ".gitconfig",           # Git configuration
-]
-
-# Safe subdirectories within ~/.config/ to mount (excludes browsers and sensitive data)
-# .config is NOT mounted entirely due to security risk from browser cookies/credentials
-SAFE_CONFIG_DIRS = [
-    "git",                  # Git configuration
-    "nvim",                 # Neovim config
-    "vim",                  # Vim config
-    "htop",                 # System monitor config
-    "nano",                 # Nano editor config
-    "less",                 # Less pager config
-    "lsd",                  # LSD (ls replacement) config
-    "bat",                  # Bat (cat replacement) config
-    "zsh",                  # Zsh config (if not in home dir)
-    "bash",                 # Bash config (if not in home dir)
-    "fish",                 # Fish shell config
-    "alacritty",            # Terminal emulator config
-    "kitty",                # Terminal emulator config
-]
-
-# Directories to explicitly exclude (even in unsafe-allow mode)
-EXCLUDED_HOME_DIRS = [
-    ".ssh",
-    ".aws",
-    ".kube",
-    ".gnupg",
-    ".password-store",
-]
-
-# Dangerous suid binaries that should not be available in the sandbox
-DANGEROUS_SUID_BINARIES = [
-    "/usr/bin/su",           # Switch user
-    "/usr/bin/sudo",         # Execute as another user
-    "/usr/bin/sudoedit",     # Edit files as another user
-    "/usr/bin/chsh",         # Change shell
-    "/usr/bin/chfn",         # Change finger info
-    "/usr/bin/passwd",       # Change password
-    "/usr/bin/chpasswd",     # Change passwords in batch
-    "/usr/bin/mount",        # Mount filesystems
-    "/usr/bin/umount",       # Unmount filesystems
-    "/usr/bin/fusermount",   # FUSE mounts
-    "/usr/sbin/useradd",     # Add user accounts
-    "/usr/sbin/usermod",     # Modify user accounts
-    "/usr/sbin/groupadd",    # Add groups
-    "/usr/sbin/groupmod",    # Modify groups
-    "/usr/sbin/userdel",     # Delete users
-    "/usr/sbin/groupdel",    # Delete groups
-    "/usr/bin/chown",        # Change file ownership
-    "/usr/bin/chgrp",        # Change group ownership
-    "/usr/bin/setcap",       # Set capabilities
-    "/usr/bin/setfacl",      # Set ACLs
-    "/usr/bin/ip",           # Network configuration
-]
-
-# Essential /etc files to mount (minimal /etc)
-ESSENTIAL_ETC_FILES = [
-    "hostname",
-    "hosts",
-    "resolv.conf",
-    "passwd",
-    "group",
-]
-
-# Additional directories to mount (handled separately in mount_minimal_etc)
-ESSENTIAL_ETC_DIRS = [
-    "pki",                # CA certificates (used by Fedora/RHEL, /etc/ssl symlinks here)
-    "ssl",                # CA certificates (used by Debian/Ubuntu and compatibility)
-    "crypto-policies",    # OpenSSL configuration (Fedora/RHEL)
-]
-
-
-def get_filesystem_type(path):
-    """Detect filesystem type for a given path."""
-    try:
-        result = subprocess.run(
-            ["df", "-T", path],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            if len(lines) > 1:
-                fs_type = lines[1].split()[1]
-                return fs_type
-    except Exception:
-        pass
-    return None
+import subprocess
+import bw_lib
 
 def get_claude_path():
     """Return the path to the Claude CLI executable."""
@@ -142,355 +17,41 @@ def get_claude_path():
         sys.exit(1)
     return str(claude_path)
 
-
-def ensure_claude_dir_exists(target_dir):
-    """Create the project .claude directory if it doesn't exist."""
-    claude_dir = target_dir / ".claude"
-    if not claude_dir.exists():
-        claude_dir.mkdir(exist_ok=True)
-
-
-def create_tmp_export_dir():
-    """Create an isolated /tmp export directory in the real /tmp."""
-    session_id = str(uuid.uuid4())[:8]
-    export_dir = Path("/tmp") / f"bw-claude-{session_id}"
-    export_dir.mkdir(exist_ok=True, mode=0o755)
-    return str(export_dir)
-
-
-def mount_safe_home_dirs(cmd, home):
-    """Mount only safe directories from home."""
-    for dir_name in SAFE_HOME_DIRS:
-        dir_path = os.path.join(home, dir_name)
-        if os.path.exists(dir_path):
-            cmd.extend(["--ro-bind", dir_path, dir_path])
-
-
-def mount_safe_config_dirs(cmd, home):
-    """Mount only safe subdirectories from ~/.config (excludes browsers and sensitive data).
-
-    This prevents Claude from accessing:
-    - Browser cookies (Chrome/Chromium/Brave/Edge store credentials in .config/)
-    - Browser cache and history
-    - Other sensitive application data
-
-    Safe directories are whitelisted development tool configs.
-    """
-    config_dir = os.path.join(home, ".config")
-    for subdir in SAFE_CONFIG_DIRS:
-        subdir_path = os.path.join(config_dir, subdir)
-        if os.path.exists(subdir_path):
-            cmd.extend(["--ro-bind", subdir_path, subdir_path])
-
-
-def mount_minimal_etc(cmd):
-    """Mount /etc as read-only with only essential files/directories accessible.
-
-    First mounts /etc read-only to prevent writing forged files, then mounts
-    only essential subdirectories on top for access. This two-layer approach ensures:
-    - /etc/shadow, /etc/sudoers, /etc/gshadow are not writable
-    - Unknown /etc files cannot be modified
-    - Only needed files are accessible
-    """
-    # Mount entire /etc as read-only first
-    if os.path.exists("/etc"):
-        cmd.extend(["--ro-bind", "/etc", "/etc"])
-
-    # Then mount specific essential directories (overrides the RO bind with accessible versions)
-    # Note: This doesn't make them writable, just ensures they're accessible if needed
-    for dirname in ESSENTIAL_ETC_DIRS:
-        dirpath = f"/etc/{dirname}"
-        if os.path.exists(dirpath):
-            cmd.extend(["--ro-bind", dirpath, dirpath])
-
-
-def build_bwrap_command(claude_path, args, target_dir=None):
-    """Build the complete bwrap command with security options.
-
-    Args:
-        claude_path: Path to Claude CLI (can be None for shell mode)
-        args: Parsed command-line arguments
-        target_dir: Target working directory in sandbox (defaults to current directory)
-    """
-    home = str(Path.home())
-
-    # Determine working directory
-    if target_dir:
-        pwd = str(target_dir)
-    elif args.dir:
-        pwd = os.path.abspath(args.dir)
-    else:
-        pwd = str(Path.cwd())
-
-    # Validate directory exists
-    if not os.path.isdir(pwd):
-        print(f"Error: Directory does not exist: {pwd}", file=sys.stderr)
-        sys.exit(1)
-
-    # Create isolated /tmp export directory
-    export_tmp = create_tmp_export_dir()
-
-    cmd = ["bwrap"]
-
-    # Basic sandbox setup
-    cmd.extend(["--die-with-parent"])
-    cmd.extend(["--unshare-pid"])
-    cmd.extend(["--unshare-ipc"])
-
-    # Network access (default: enabled)
-    if not args.no_network:
-        cmd.extend(["--share-net"])
-
-    # Home directory access (safe by default)
-    if args.full_home_access:
-        # Full home access (unsafe)
-        cmd.extend(["--ro-bind", home, home])
-    else:
-        # Safe mode: restrict to safe directories only
-        mount_safe_home_dirs(cmd, home)
-        # Mount safe .config subdirectories (excludes browsers to protect cookies/credentials)
-        mount_safe_config_dirs(cmd, home)
-
-    # System binaries and libraries (read-only)
-    cmd.extend(["--ro-bind", "/usr", "/usr"])
-    cmd.extend(["--ro-bind", "/lib", "/lib"])
-    cmd.extend(["--ro-bind", "/lib64", "/lib64"])
-
-    # /etc handling (minimal for security)
-    mount_minimal_etc(cmd)
-
-    # Create /bin as symlink to /usr/bin for compatibility
-    cmd.extend(["--symlink", "/usr/bin", "/bin"])
-
-    # /tmp: use isolated export directory
-    cmd.extend(["--bind", export_tmp, "/tmp"])
-
-    # ~/.claude: read-write (Claude needs to manage settings, state, telemetry, etc.)
-    global_claude_dir = f"{home}/.claude"
-    if os.path.exists(global_claude_dir):
-        cmd.extend(["--bind", global_claude_dir, global_claude_dir])
-
-    # ~/.claude.json: read-write (Claude state file in home directory)
-    claude_json = f"{home}/.claude.json"
-    if not os.path.exists(claude_json):
-        # Create empty file so bind mount works
-        Path(claude_json).touch()
-    cmd.extend(["--bind", claude_json, claude_json])
-
-    # $PWD: read-only project directory (Claude can read all files in the project)
-    cmd.extend(["--ro-bind", pwd, pwd])
-
-    # $PWD/.claude: read-write overlay on top of read-only $PWD
-    # This allows Claude to write state files while keeping the rest of the project RO
-    project_claude_dir = f"{pwd}/.claude"
-    if os.path.exists(project_claude_dir):
-        cmd.extend(["--bind", project_claude_dir, project_claude_dir])
-    elif not args.shell:
-        # Create it for non-shell mode, then mount it
-        ensure_claude_dir_exists(target_dir)
-        cmd.extend(["--bind", project_claude_dir, project_claude_dir])
-
-    # Process and device access
-    cmd.extend(["--proc", "/proc"])
-    cmd.extend(["--dev-bind", "/dev", "/dev"])
-
-    # Root filesystem setup
-    cmd.extend(["--tmpfs", "/root"])
-
-    # Set working directory
-    cmd.extend(["--chdir", pwd])
-
-    # Preserve essential environment variables
-    path = os.getenv('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')
-    cmd.extend([
-        "--clearenv",
-        "--setenv", "HOME", home,
-        "--setenv", "PWD", pwd,
-        "--setenv", "USER", os.getenv('USER', 'user'),
-        "--setenv", "PATH", path,
-    ])
-
-    # Set TERM - needed for interactive shells
-    term = os.getenv('TERM', 'xterm')
-    cmd.extend(["--setenv", "TERM", term])
-
-    # Shell or Claude command
-    if args.shell:
-        cmd.append("/bin/sh")
-        cmd.append("-i")
-    else:
-        cmd.append(claude_path)
-        # Add --dangerously-skip-permissions by default (actually skips, not just allows)
-        if not args.no_skip_permissions:
-            cmd.append("--dangerously-skip-permissions")
-        cmd.extend(args.claude_args)
-
-    # Mount additional paths (--allow-ro and --allow-rw)
-    for ro_path in args.allow_ro_paths:
-        if os.path.exists(ro_path):
-            cmd.extend(["--ro-bind", ro_path, ro_path])
-        else:
-            print(f"[bw-claude] Warning: --allow-ro path does not exist: {ro_path}", file=sys.stderr)
-
-    for rw_path in args.allow_rw_paths:
-        if os.path.exists(rw_path):
-            cmd.extend(["--bind", rw_path, rw_path])
-        else:
-            print(f"[bw-claude] Warning: --allow-rw path does not exist: {rw_path}", file=sys.stderr)
-
-    # Print debug info if verbose
-    if args.verbose:
-        print(f"[bw-claude] Working directory: {pwd}", file=sys.stderr)
-        print(f"[bw-claude] Export /tmp: {export_tmp}", file=sys.stderr)
-        print(f"[bw-claude] Network: {'disabled' if args.no_network else 'enabled'}",
-              file=sys.stderr)
-        print(f"[bw-claude] Home access: {'full (unsafe)' if args.full_home_access else 'safe (restricted)'}",
-              file=sys.stderr)
-        if args.shell:
-            print(f"[bw-claude] Mode: Interactive shell", file=sys.stderr)
-        if args.allow_ro_paths:
-            print(f"[bw-claude] Additional read-only paths: {', '.join(args.allow_ro_paths)}", file=sys.stderr)
-        if args.allow_rw_paths:
-            print(f"[bw-claude] Additional read-write paths: {', '.join(args.allow_rw_paths)}", file=sys.stderr)
-        print(f"[bw-claude] Command: {' '.join(cmd)}", file=sys.stderr)
-
-    return cmd
-
-
-def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        prog="bw-claude",
-        description="Bubblewrap sandboxing wrapper for Claude CLI",
-        add_help=False,  # Custom help handling
-    )
-
-    parser.add_argument(
-        "--no-network",
-        action="store_true",
-        help="Disable network access (default: network enabled)",
-    )
-
-    parser.add_argument(
-        "--full-home-access",
-        action="store_true",
-        help="Allow full home directory access (default: safe dirs only)",
-    )
-
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Print sandbox configuration and bwrap command to stderr",
-    )
-
-    parser.add_argument(
-        "--shell",
-        action="store_true",
-        help="Launch an interactive shell in the sandbox (for debugging)",
-    )
-
-    parser.add_argument(
-        "--allow-ro",
-        action="append",
-        dest="allow_ro_paths",
-        metavar="PATH",
-        help="Mount additional read-only path (can be used multiple times)",
-    )
-
-    parser.add_argument(
-        "--allow-rw",
-        action="append",
-        dest="allow_rw_paths",
-        metavar="PATH",
-        help="Mount additional read-write path (can be used multiple times)",
-    )
-
-    parser.add_argument(
-        "--no-skip-permissions",
-        action="store_true",
-        help="Disable --dangerously-skip-permissions for Claude (default: enabled)",
-    )
-
-    parser.add_argument(
-        "--dir",
-        metavar="PATH",
-        help="Set working directory in sandbox (default: current directory)",
-    )
-
-    parser.add_argument(
-        "--help",
-        "-h",
-        action="store_true",
-        help="Show this help message",
-    )
-
-    # Parse arguments, handling -- separator for Claude args
-    args_list = sys.argv[1:]
-    if "--" in args_list:
-        sep_idx = args_list.index("--")
-        bw_args = args_list[:sep_idx]
-        claude_args = args_list[sep_idx + 1:]
-        args = parser.parse_args(bw_args)
-        args.claude_args = claude_args
-    else:
-        # Parse known arguments, rest go to Claude
-        args, claude_args = parser.parse_known_args()
-        args.claude_args = claude_args
-
-    if args.help:
-        parser.print_help()
-        print("\nClaude options:")
-        print("  By default, --dangerously-skip-permissions is passed to Claude (skips all permission prompts).")
-        print("  Use --no-skip-permissions to disable this behavior.")
-        print("\nClaude arguments are passed through unchanged.")
-        print("Use -- to explicitly separate bw-claude options from Claude options:")
-        print("  ./bw-claude --no-network -- code myfile.py")
-        print("\nAdditional paths can be mounted with --allow-ro and --allow-rw:")
-        print("  ./bw-claude --allow-ro /var/log --allow-rw /tmp/custom -- code file.py")
-        sys.exit(0)
-
-    # Set defaults for path lists
-    if args.allow_ro_paths is None:
-        args.allow_ro_paths = []
-    if args.allow_rw_paths is None:
-        args.allow_rw_paths = []
-
-    return args
-
+CLAUDE_CONFIG = {
+    "name": "claude",
+    "get_cli_path": get_claude_path,
+    "home_dot_file": ".claude.json",
+    "default_args": ["--dangerously-skip-permissions"],
+    "default_args_flag": "no_skip_permissions",
+    "help_text": """
+Claude options:
+  By default, --dangerously-skip-permissions is passed to Claude.
+  Use --no-skip-permissions to disable this behavior.
+"""
+}
 
 def main():
     """Main entry point."""
-    args = parse_args()
+    prog_name = f"bw-{CLAUDE_CONFIG['name']}"
+    args = bw_lib.parse_args(prog_name, CLAUDE_CONFIG['name'], CLAUDE_CONFIG)
 
-    target_dir = None
-
-    # Determine target directory (for --dir option)
-    if args.dir:
-        target_dir = Path(args.dir).absolute()
-        if not os.path.isdir(target_dir):
-            print(f"Error: Directory does not exist: {target_dir}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        target_dir = Path.cwd()
-
-    args_for_build = args
+    target_dir = Path(args.dir).absolute() if args.dir else Path.cwd()
+    if args.dir and not target_dir.is_dir():
+        print(f"Error: Directory does not exist: {target_dir}", file=sys.stderr)
+        sys.exit(1)
 
     try:
-        if args.shell:
-            # Shell mode doesn't need Claude path, just build command
-            bwrap_cmd = build_bwrap_command(None, args_for_build, target_dir)
-        else:
-            claude_path = get_claude_path()
-            bwrap_cmd = build_bwrap_command(claude_path, args_for_build, target_dir)
+        cli_path = None
+        if not args.shell:
+            cli_path = CLAUDE_CONFIG["get_cli_path"]()
 
-        # For shell mode, ensure interactive terminal
-        if args.shell:
-            result = subprocess.run(bwrap_cmd, text=True)
-        else:
-            result = subprocess.run(bwrap_cmd)
+        bwrap_cmd = bw_lib.build_bwrap_command(
+            cli_path, args, CLAUDE_CONFIG, target_dir
+        )
 
-        sys.exit(result.returncode)
+        proc = subprocess.run(bwrap_cmd, text=args.shell)
+        sys.exit(proc.returncode)
+
     except FileNotFoundError:
         print("Error: bwrap not found. Please install bubblewrap.", file=sys.stderr)
         sys.exit(1)
