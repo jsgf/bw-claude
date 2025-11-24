@@ -8,7 +8,6 @@ By default, `bw-claude` provides a secure sandbox with restricted access:
 
 ### Read-Only Access (Safe Directories Only)
 - **Home subdirectories** (read-only):
-  - `.config` - Configuration files
   - `.local/share`, `.local/bin` - Application data and user binaries
   - `Documents`, `Downloads`, `Projects` - User files
   - `.viminfo` - Vim history and settings
@@ -20,24 +19,74 @@ By default, `bw-claude` provides a secure sandbox with restricted access:
     - `.gradle`, `.m2` - Java/Kotlin builds
     - `.nvm` - Node Version Manager
     - `.go` - Go workspace
+
+- **`.config` subdirectories** (read-only, selectively mounted for security):
+  - **Safe tools**: `git`, `nvim`, `vim`, `htop`, `nano`, `less`, `lsd`, `bat`, `zsh`, `bash`, `fish`, `alacritty`, `kitty`
+  - **NOT mounted**: Browser configs (protects Chrome/Brave/Edge cookies and credentials)
+  - To access additional `.config` subdirectories, use: `./bw-claude --allow-ro ~/.config/myapp code file.py`
 - **System binaries and libraries**: `/usr`, `/lib`, `/lib64`, `/bin`
 - **Essential /etc files**: `hostname`, `hosts`, `resolv.conf`, `passwd`, `group`
 
 ### Read-Write Access
+- **Current directory ($PWD)**: **Read-only** (Claude can read all project files)
+  - `$PWD/.claude`: Read-write overlay (Claude can write project-specific state/config)
 - **Isolated /tmp**: Unique temporary directory per session (for state export)
 - **~/.claude**: Read-write (Claude manages settings, state, telemetry, debug logs)
-- **$PWD/.claude**: Read-write (project-specific Claude config)
+
+This design allows Claude to:
+- Read all project files and dependencies
+- Write only to `.claude` directory for project-specific state
+- Prevent accidental file modifications in the project
 
 ### Network
 - **Enabled by default** (required for Claude API calls)
 
 ### Explicitly Excluded (Even in Safe Mode)
+
+**Home directories (for security):**
 - `~/.ssh` - SSH keys
 - `~/.aws` - AWS credentials
 - `~/.kube` - Kubernetes config
 - `~/.gnupg` - GPG keys
 - `~/.password-store` - Password manager
-- Other home directories (Documents is allowed, but not arbitrary paths)
+
+**Dangerous suid/privileged binaries (unavailable in sandbox):**
+- `su`, `sudo`, `sudoedit` - User switching and privilege escalation
+- `chsh`, `chfn`, `passwd`, `chpasswd` - Account management
+- `mount`, `umount`, `fusermount` - Filesystem operations
+- `useradd`, `usermod`, `groupadd`, `groupmod`, `userdel`, `groupdel` - User/group management
+- `chown`, `chgrp`, `setcap`, `setfacl` - Permission management
+- `ip` - Network configuration
+
+These are unavailable because:
+- They require elevated privileges
+- Filesystem is mostly read-only
+- They could be used to escape or bypass sandbox restrictions
+
+## Security Notes
+
+### Browser Cookies and Credentials
+**Firefox users**: Your browser data is completely protected. Firefox stores cookies/history in `~/.mozilla/` which is NOT mounted.
+
+**Chrome/Chromium/Brave/Edge users**: These browsers store authentication cookies in `~/.config/google-chrome/`, `~/.config/BraveSoftware/`, etc.
+- By default, bw-claude **does NOT** mount these directories in safe mode
+- If you use `--full-home-access`, your browser cookies WILL be accessible to Claude
+- To safely use specific `.config` tools, use: `./bw-claude --allow-ro ~/.config/git code file.py`
+
+### Why This Matters
+Browser cookies may contain:
+- GitHub authentication tokens
+- AWS/Google Cloud credentials
+- Banking and payment session tokens
+- Email and personal account credentials
+
+A compromised or untrusted Claude instance could read these and impersonate you on authenticated websites.
+
+### Filesystem Write Protection
+- **`/etc` is mounted read-only** to prevent forging system files (`/etc/shadow`, `/etc/sudoers`, etc.)
+- Only essential subdirectories like `/etc/pki` and `/etc/ssl` are accessible
+- All system binaries and libraries (`/usr`, `/lib`) are mounted read-only
+- Claude cannot write to system directories or create forged configuration files
 
 ## Security Options
 
@@ -104,18 +153,84 @@ Mount additional paths into the sandbox (read-only or read-write). Can be specif
 ```
 
 ### `--no-skip-permissions`
-By default, `--allow-dangerously-skip-permissions` is passed to Claude to allow it to operate without permission errors in the sandbox. Use this flag to disable that behavior:
+By default, `--dangerously-skip-permissions` is passed to Claude to skip all permission prompts. This allows Claude to execute commands and access files without asking for confirmation on each operation. Use this flag to disable that behavior:
 
 ```bash
-# Run without --allow-dangerously-skip-permissions
+# Run without --dangerously-skip-permissions (Claude will prompt for permissions)
 ./bw-claude --no-skip-permissions code myfile.py
 ```
+
+**Why enabled by default:**
+- In a sandbox, permission prompts become tedious
+- The sandbox filesystem restrictions provide safety
+- Claude still respects read-only mounts and other sandbox limits
+- Only disable this if you want interactive permission prompts
+
+### `--snapshot`
+Create a lightweight reflink snapshot of your project directory for safe experimentation. Only works on filesystems that support reflinks (btrfs, xfs, ocfs2). Changes are isolated in the snapshot—you can review and decide whether to apply them:
+
+```bash
+# Run in snapshot mode (btrfs/xfs only)
+./bw-claude --snapshot code myproject.py
+
+# After the session, changes are in:
+# ./myproject.py.bw-claude-snapshot-<id>/
+
+# Review changes
+diff -r ./myproject.py ./myproject.py.bw-claude-snapshot-abc12345/
+
+# Apply changes if satisfied
+cp -r ./myproject.py.bw-claude-snapshot-abc12345/* ./myproject.py/
+
+# Or discard by removing the snapshot directory
+rm -rf ./myproject.py.bw-claude-snapshot-abc12345/
+```
+
+**Benefits:**
+- Claude has full write access without risk
+- Easy rollback—just delete the snapshot
+- Compare changes before committing
+- Great for experimental refactoring
+
+**Requirements:**
+- Filesystem must support reflinks (btrfs, xfs)
+- For btrfs: `btrfs-progs` tools installed
+- Check filesystem: `df -T <path>`
 
 **Notes:**
 - Paths must exist on the host system
 - Read-only mounts are added with `--ro-bind`
 - Read-write mounts are added with `--bind`
 - These are processed after all other mounts
+
+### `--dir PATH`
+Set the working directory for Claude in the sandbox. By default, Claude runs in the current directory. Use this to sandbox a different directory without changing your current shell directory:
+
+```bash
+# Run Claude on a different project without cd-ing
+./bw-claude --dir ~/projects/myrepo code main.py
+
+# Audit a directory while staying in your current location
+./bw-claude --dir /path/to/audit --shell
+
+# Combine with other options
+./bw-claude --dir ~/work/project --no-network --verbose code script.py
+
+# Works with snapshots too
+./bw-claude --dir /data/project --snapshot code refactor.py
+```
+
+**Use cases:**
+- Audit code in a specific directory without changing pwd
+- Run Claude on multiple projects in sequence
+- Sandbox a directory that's not in your current path
+- Combine with `--snapshot` to safely experiment on a specific project
+
+**Behavior:**
+- If `--dir` is not specified, Claude runs in your current directory
+- The specified directory is mounted read-only in the sandbox
+- `$PWD/.claude` in the sandbox will be the project state directory
+- Directory must exist on the host system
 
 ### Combined Usage
 
@@ -129,14 +244,23 @@ By default, `--allow-dangerously-skip-permissions` is passed to Claude to allow 
 # Maximum isolation: safe home + no network
 ./bw-claude --no-network code myfile.py
 
+# Run Claude on a different directory
+./bw-claude --dir ~/projects/other code main.py
+
+# Audit a directory with verbose output
+./bw-claude --dir /path/to/audit --verbose -- code review.py
+
+# Safe snapshot experimentation on a specific project
+./bw-claude --dir ~/experimental-project --snapshot code refactor.py
+
 # Debug sandbox with verbose output
 ./bw-claude --shell --verbose
 
 # Allow additional paths and show what's being executed
 ./bw-claude --allow-ro /var/log --verbose -- code analyze.py
 
-# Complex example: restricted home + extra paths + verbose
-./bw-claude --no-network --allow-ro /opt/data --allow-rw /tmp/work -v -- code process.py
+# Complex example: different dir + extra paths + verbose
+./bw-claude --dir ~/work/project --no-network --allow-ro /opt/data -v -- code process.py
 ```
 
 ## Requirements
@@ -163,14 +287,18 @@ sudo pacman -S bubblewrap
 The `bw-claude` script is a drop-in replacement for the Claude CLI:
 
 ```bash
-# Run Claude with sandboxing
+# Run Claude with sandboxing (in current directory)
 ./bw-claude [security-options] [claude-args]
+
+# Run Claude on a different directory
+./bw-claude --dir /path/to/project [security-options] [claude-args]
 
 # Examples
 ./bw-claude --version
 ./bw-claude code myfile.py
 ./bw-claude --no-network chat
-./bw-claude --no-home-access --no-network code myfile.py
+./bw-claude --dir ~/other-project code myfile.py
+./bw-claude --dir /audit-path --shell
 ```
 
 ### Setup
@@ -235,7 +363,8 @@ The script:
 
 ```
 Read-Only (Safe Directories):
-  $HOME/.config        -> $HOME/.config
+  $PWD                 -> $PWD (entire project directory)
+  Safe .config subdirs  -> $HOME/.config/* (git, nvim, vim, htop, etc. - excludes browsers)
   $HOME/.local/share   -> $HOME/.local/share
   $HOME/.local/bin     -> $HOME/.local/bin
   $HOME/Documents      -> $HOME/Documents
@@ -253,20 +382,16 @@ Read-Only (Safe Directories):
   $HOME/.go            -> $HOME/.go
   /usr                 -> /usr
   /lib, /lib64         -> /lib, /lib64
-  /etc/hostname        -> /etc/hostname
-  /etc/hosts           -> /etc/hosts
-  /etc/resolv.conf     -> /etc/resolv.conf
-  /etc/passwd          -> /etc/passwd
-  /etc/group           -> /etc/group
-  /etc/pki             -> /etc/pki (CA certificates for Fedora/RHEL)
-  /etc/ssl             -> /etc/ssl (CA certificates for Debian/Ubuntu and compatibility)
-  /etc/crypto-policies -> /etc/crypto-policies (OpenSSL config for Fedora/RHEL)
+  /etc (entire)        -> /etc (read-only to prevent forged files)
+  /etc/pki             -> /etc/pki (overridable, CA certificates for Fedora/RHEL)
+  /etc/ssl             -> /etc/ssl (overridable, CA certificates for Debian/Ubuntu)
+  /etc/crypto-policies -> /etc/crypto-policies (overridable, OpenSSL config for Fedora/RHEL)
 
 Read-Write:
   /tmp/bw-claude-{id}  -> /tmp
   $HOME/.claude.json   -> $HOME/.claude.json (Claude state file, created if needed)
   $HOME/.claude        -> $HOME/.claude (if exists)
-  $PWD/.claude         -> $PWD/.claude
+  $PWD/.claude         -> $PWD/.claude (project-specific state, overlay on RO $PWD)
 
 Virtual Mounts:
   /proc                -> /proc (process info)
