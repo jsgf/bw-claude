@@ -38,5 +38,10 @@ ENV/
 .coverage
 htmlcov/
 
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
 # Project-specific
 .claude/

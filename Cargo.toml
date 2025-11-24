@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "bwrap-core",
+    "bwrap-proxy",
+    "bw-claude",
+    "bw-gemini",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Jeremy Fitzhardinge <[email protected]>"]
+
+[workspace.dependencies]
+# Shared dependencies across workspace
+tokio = { version = "1.42", features = ["full"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Internal crates
+bwrap-core = { path = "bwrap-core" }
+bwrap-proxy = { path = "bwrap-proxy" }
