@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "bwrap-core",
     "bwrap-proxy",
+    "bw-relay",
     "bw-claude",
     "bw-gemini",
 ]
@@ -21,6 +22,32 @@ anyhow = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# SOCKS5 proxy
+fast-socks5 = "0.9"
+tokio-socks = "0.5"
+
+# HTTP proxy
+hyper = { version = "1.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Network filtering
+ipnet = "2.10"
+wildmatch = "2.3"
+
+# Configuration
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+# Async utilities
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Date/time for learning mode
+chrono = "0.4"
+
+# Testing utilities
+tempfile = "3.14"
 
 # Internal crates
 bwrap-core = { path = "bwrap-core" }

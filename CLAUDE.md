@@ -1,0 +1,1 @@
+- Project is managed with jj scm, not git

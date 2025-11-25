@@ -167,6 +167,36 @@ impl SandboxBuilder {
             }
         }
 
+        // Handle Filtered network mode setup
+        if let NetworkMode::Filtered { proxy_socket, .. } = &self.config.network_mode {
+            // Mount proxy socket for relay to connect to
+            self.mounts
+                .push(MountPoint::rw(proxy_socket, &PathBuf::from("/proxy.sock")));
+
+            // Mount bw-relay binary - find it next to current executable
+            let relay_path = std::env::current_exe()
+                .ok()
+                .and_then(|exe_path| exe_path.parent().map(|p| p.to_path_buf()))
+                .ok_or_else(|| {
+                    SandboxError::TmpDirCreation(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Could not determine executable directory",
+                    ))
+                })?
+                .join("bw-relay");
+
+            if relay_path.exists() {
+                self.mounts
+                    .push(MountPoint::ro(&relay_path, &PathBuf::from("/usr/local/bin/bw-relay")));
+            } else {
+                // Don't fail if bw-relay is not found - it might be in PATH
+                tracing::warn!(
+                    "bw-relay binary not found at {:?}, it may need to be in PATH",
+                    relay_path
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -263,7 +293,6 @@ impl SandboxBuilder {
                 cmd.arg("--unshare-net");
             }
             NetworkMode::Filtered { .. } => {
-                // TODO: Implement proxy filtering
                 cmd.arg("--share-net");
             }
         }
@@ -293,7 +322,16 @@ impl SandboxBuilder {
         cmd.args(self.env_builder.to_args());
 
         // Shell or CLI command
-        if self.config.shell {
+        // In Filtered mode, execute bw-relay with the target command
+        if let NetworkMode::Filtered { proxy_socket, .. } = &self.config.network_mode {
+            let relay_args = crate::startup_script::build_relay_command(
+                proxy_socket,
+                &PathBuf::from("/usr/local/bin/bw-relay"),
+                &self.config.tool_config.cli_path,
+                &self.config.tool_config.cli_args,
+            );
+            cmd.args(relay_args);
+        } else if self.config.shell {
             cmd.arg("/bin/sh").arg("-i");
         } else {
             cmd.arg(&self.config.tool_config.cli_path);

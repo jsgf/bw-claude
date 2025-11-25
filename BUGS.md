@@ -1,0 +1,3 @@
+- /etc/ is writable. It should be RO and only populated with necessary files (in safe mode)
+- working dir should be RW by default
+- allow relative paths for --allow-ro/rw

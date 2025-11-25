@@ -6,6 +6,8 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use std::process::Child;
+use std::time::SystemTime;
 
 #[derive(Parser)]
 #[command(
@@ -50,12 +52,21 @@ struct Args {
     #[arg(long = "pass-env", value_name = "VAR_NAME")]
     pass_env_vars: Vec<String>,
 
+    /// Enable filtered proxy mode for fine-grained network control
+    #[arg(long)]
+    use_filter_proxy: bool,
+
+    /// Proxy configuration file (TOML format)
+    #[arg(long, value_name = "PATH")]
+    proxy_config: Option<PathBuf>,
+
     /// Claude arguments (use -- to separate from bw-claude options)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     cli_args: Vec<String>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging
@@ -90,16 +101,28 @@ fn main() -> Result<()> {
         env::current_dir().context("Failed to get current directory")?
     };
 
+    // Handle proxy lifecycle if needed
+    let (network_mode, proxy_process) = if args.use_filter_proxy {
+        let (socket_path, proxy) = spawn_proxy_daemon(&args.proxy_config, args.verbose).await?;
+        (
+            NetworkMode::Filtered {
+                proxy_socket: socket_path,
+                allowed_domains: vec![],
+            },
+            Some(proxy),
+        )
+    } else if args.no_network {
+        (NetworkMode::Disabled, None)
+    } else {
+        (NetworkMode::Enabled, None)
+    };
+
     // Build sandbox configuration
     let config = SandboxConfig {
         tool_name: "claude".to_string(),
         tool_config,
         target_dir,
-        network_mode: if args.no_network {
-            NetworkMode::Disabled
-        } else {
-            NetworkMode::Enabled
-        },
+        network_mode,
         home_access: if args.full_home_access {
             HomeAccessMode::Full
         } else {
@@ -121,6 +144,11 @@ fn main() -> Result<()> {
 
     let status = sandbox.exec().context("Failed to execute sandbox")?;
 
+    // Clean up proxy process if it was spawned
+    if let Some(mut proxy) = proxy_process {
+        let _ = proxy.kill();
+    }
+
     std::process::exit(status.code().unwrap_or(1))
 }
 
@@ -136,4 +164,36 @@ fn get_claude_path() -> Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+async fn spawn_proxy_daemon(config_path: &Option<PathBuf>, verbose: bool) -> Result<(PathBuf, Child)> {
+    // Generate a unique socket path in /tmp
+    let session_id = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .context("Failed to get system time")?
+        .as_nanos();
+    let socket_path = PathBuf::from(format!("/tmp/bw-claude-proxy-{}.sock", session_id));
+
+    // Build bwrap-proxy command
+    let mut cmd = std::process::Command::new("bwrap-proxy");
+    cmd.arg("--socket").arg(&socket_path);
+    cmd.arg("--mode").arg("open"); // Could be made configurable
+
+    // Add config if provided
+    if let Some(config) = config_path {
+        cmd.arg("--config").arg(config);
+    }
+
+    if verbose {
+        cmd.arg("--verbose");
+    }
+
+    // Spawn the proxy daemon
+    let proxy = cmd.spawn()
+        .context("Failed to spawn bwrap-proxy daemon")?;
+
+    // Wait a bit for the socket to be created
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    Ok((socket_path, proxy))
 }

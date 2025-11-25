@@ -1,0 +1,74 @@
+# Example bwrap-proxy configuration file
+# This file demonstrates how to configure fine-grained network filtering
+# for Claude and Gemini CLI tools when using --use-filter-proxy
+
+[mode]
+# Filtering mode: "open" (allow by default), "restrictive" (deny by default)
+type = "open"
+
+# Optional: learning mode to record new domains
+learning_enabled = false
+learning_file = ".claude-network-learning.json"
+
+# Host groups define sets of domains with shared permissions
+[[host_groups]]
+name = "apis"
+description = "Essential APIs for Claude operation"
+domains = [
+  "api.openai.com",
+  "*.openai.com",
+]
+
+[[host_groups]]
+name = "development"
+description = "Development and package management"
+domains = [
+  "github.com",
+  "*.github.com",
+  "registry.npmjs.org",
+  "crates.io",
+  "pypi.org",
+  "*.python.org",
+]
+
+[[host_groups]]
+name = "documentation"
+description = "Reference documentation"
+domains = [
+  "*.github.io",
+  "docs.rs",
+  "docs.python.org",
+  "nodejs.org",
+]
+
+# IP groups for network ranges
+[[ip_groups]]
+name = "local_network"
+description = "Local network access"
+ranges = [
+  "127.0.0.1/8",
+  "192.168.0.0/16",
+  "10.0.0.0/8",
+]
+
+# Policies define what can be accessed in each mode
+[[policies]]
+# In "open" mode, deny these by default
+name = "restricted"
+mode = "open"
+action = "deny"
+host_groups = ["internal", "sensitive"]
+
+[[policies]]
+# In "open" mode, allow these by default
+name = "allowed"
+mode = "open"
+action = "allow"
+host_groups = ["apis", "development", "documentation"]
+
+# Rules can reference IP groups too
+[[policies]]
+name = "local_allowed"
+mode = "open"
+action = "allow"
+ip_groups = ["local_network"]

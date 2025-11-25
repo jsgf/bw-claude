@@ -83,7 +83,8 @@ mod tests {
         let args = builder.to_args();
 
         // Check that we have the right number of arguments (--setenv KEY VALUE for each)
-        assert_eq!(args.len(), 4);
+        // 2 variables * 3 args each (--setenv, KEY, VALUE) = 6 args
+        assert_eq!(args.len(), 6);
         assert!(args.contains(&OsString::from("--setenv")));
     }
 }

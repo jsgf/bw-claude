@@ -1,0 +1,26 @@
+[package]
+name = "bw-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bw-relay"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+# SOCKS5 client for forwarding to UDS
+tokio-socks = "0.5"
+
+# HTTP proxy server
+hyper = { version = "1.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"

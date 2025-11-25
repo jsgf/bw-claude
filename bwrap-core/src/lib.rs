@@ -8,6 +8,7 @@ pub mod env;
 pub mod error;
 pub mod mount;
 pub mod sandbox;
+pub mod startup_script;
 
 pub use config::{HomeAccessMode, NetworkMode, SandboxConfig, ToolConfig};
 pub use error::{Result, SandboxError};
