@@ -2,11 +2,12 @@
 
 use anyhow::{Context, Result};
 use bwrap_core::{HomeAccessMode, NetworkMode, SandboxBuilder, SandboxConfig, ToolConfig};
+use bwrap_proxy::{ConfigLoader, ProxyServer, ProxyServerConfig};
 use clap::Parser;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::process::Child;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 #[derive(Parser)]
@@ -60,6 +61,10 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     proxy_config: Option<PathBuf>,
 
+    /// Path to bw-relay binary (for filtered proxy mode)
+    #[arg(long, value_name = "PATH")]
+    bw_relay_path: Option<PathBuf>,
+
     /// Claude arguments (use -- to separate from bw-claude options)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     cli_args: Vec<String>,
@@ -102,19 +107,17 @@ async fn main() -> Result<()> {
     };
 
     // Handle proxy lifecycle if needed
-    let (network_mode, proxy_process) = if args.use_filter_proxy {
-        let (socket_path, proxy) = spawn_proxy_daemon(&args.proxy_config, args.verbose).await?;
-        (
-            NetworkMode::Filtered {
-                proxy_socket: socket_path,
-                allowed_domains: vec![],
-            },
-            Some(proxy),
-        )
+    // The proxy runs as an async task spawned within create_proxy_task
+    let network_mode = if args.use_filter_proxy {
+        let socket_path = create_proxy_task(&args.proxy_config, args.verbose).await?;
+        NetworkMode::Filtered {
+            proxy_socket: socket_path,
+            allowed_domains: vec![],
+        }
     } else if args.no_network {
-        (NetworkMode::Disabled, None)
+        NetworkMode::Disabled
     } else {
-        (NetworkMode::Enabled, None)
+        NetworkMode::Enabled
     };
 
     // Build sandbox configuration
@@ -134,6 +137,7 @@ async fn main() -> Result<()> {
         pass_through_env: args.pass_env_vars,
         verbose: args.verbose,
         shell: args.shell,
+        bw_relay_path: args.bw_relay_path,
     };
 
     // Build and execute sandbox
@@ -143,11 +147,6 @@ async fn main() -> Result<()> {
         .context("Failed to build sandbox")?;
 
     let status = sandbox.exec().context("Failed to execute sandbox")?;
-
-    // Clean up proxy process if it was spawned
-    if let Some(mut proxy) = proxy_process {
-        let _ = proxy.kill();
-    }
 
     std::process::exit(status.code().unwrap_or(1))
 }
@@ -166,7 +165,8 @@ fn get_claude_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn spawn_proxy_daemon(config_path: &Option<PathBuf>, verbose: bool) -> Result<(PathBuf, Child)> {
+/// Create and spawn the proxy server as an async task
+async fn create_proxy_task(config_path: &Option<PathBuf>, _verbose: bool) -> Result<PathBuf> {
     // Generate a unique socket path in /tmp
     let session_id = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -174,26 +174,29 @@ async fn spawn_proxy_daemon(config_path: &Option<PathBuf>, verbose: bool) -> Res
         .as_nanos();
     let socket_path = PathBuf::from(format!("/tmp/bw-claude-proxy-{}.sock", session_id));
 
-    // Build bwrap-proxy command
-    let mut cmd = std::process::Command::new("bwrap-proxy");
-    cmd.arg("--socket").arg(&socket_path);
-    cmd.arg("--mode").arg("open"); // Could be made configurable
+    // Load configuration
+    let config = ConfigLoader::load_or_default(config_path.clone())
+        .context("Failed to load proxy configuration")?;
 
-    // Add config if provided
-    if let Some(config) = config_path {
-        cmd.arg("--config").arg(config);
-    }
+    // Create proxy server
+    let proxy_config = ProxyServerConfig {
+        socket_path: socket_path.clone(),
+        network_config: Arc::new(config.network),
+        policy_engine: None, // Default to open mode
+        learning_recorder: None,
+    };
 
-    if verbose {
-        cmd.arg("--verbose");
-    }
+    let proxy = ProxyServer::new(proxy_config);
 
-    // Spawn the proxy daemon
-    let proxy = cmd.spawn()
-        .context("Failed to spawn bwrap-proxy daemon")?;
+    // Spawn as async task (will run until bw-claude exits)
+    tokio::spawn(async move {
+        if let Err(e) = proxy.start().await {
+            tracing::error!("Proxy server error: {}", e);
+        }
+    });
 
     // Wait a bit for the socket to be created
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    Ok((socket_path, proxy))
+    Ok(socket_path)
 }

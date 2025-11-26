@@ -2,10 +2,13 @@
 
 use anyhow::{Context, Result};
 use bwrap_core::{HomeAccessMode, NetworkMode, SandboxBuilder, SandboxConfig, ToolConfig};
+use bwrap_proxy::{ConfigLoader, ProxyServer, ProxyServerConfig};
 use clap::Parser;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::SystemTime;
 
 #[derive(Parser)]
 #[command(
@@ -46,12 +49,25 @@ struct Args {
     #[arg(long = "pass-env", value_name = "VAR_NAME")]
     pass_env_vars: Vec<String>,
 
+    /// Enable filtered proxy mode for fine-grained network control
+    #[arg(long)]
+    use_filter_proxy: bool,
+
+    /// Proxy configuration file (TOML format)
+    #[arg(long, value_name = "PATH")]
+    proxy_config: Option<PathBuf>,
+
+    /// Path to bw-relay binary (for filtered proxy mode)
+    #[arg(long, value_name = "PATH")]
+    bw_relay_path: Option<PathBuf>,
+
     /// Gemini arguments (use -- to separate from bw-gemini options)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     cli_args: Vec<String>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging
@@ -82,16 +98,26 @@ fn main() -> Result<()> {
         env::current_dir().context("Failed to get current directory")?
     };
 
+    // Handle proxy lifecycle if needed
+    // The proxy runs as an async task spawned within create_proxy_task
+    let network_mode = if args.use_filter_proxy {
+        let socket_path = create_proxy_task(&args.proxy_config, args.verbose).await?;
+        NetworkMode::Filtered {
+            proxy_socket: socket_path,
+            allowed_domains: vec![],
+        }
+    } else if args.no_network {
+        NetworkMode::Disabled
+    } else {
+        NetworkMode::Enabled
+    };
+
     // Build sandbox configuration
     let config = SandboxConfig {
         tool_name: "gemini".to_string(),
         tool_config,
         target_dir,
-        network_mode: if args.no_network {
-            NetworkMode::Disabled
-        } else {
-            NetworkMode::Enabled
-        },
+        network_mode,
         home_access: if args.full_home_access {
             HomeAccessMode::Full
         } else {
@@ -103,6 +129,7 @@ fn main() -> Result<()> {
         pass_through_env: args.pass_env_vars,
         verbose: args.verbose,
         shell: args.shell,
+        bw_relay_path: args.bw_relay_path,
     };
 
     // Build and execute sandbox
@@ -139,4 +166,40 @@ fn get_gemini_path() -> Result<PathBuf> {
         "Gemini CLI not found at {:?} or in PATH",
         PathBuf::from(home).join(".local/bin/gemini")
     );
+}
+
+/// Create and spawn the proxy server as an async task
+async fn create_proxy_task(config_path: &Option<PathBuf>, _verbose: bool) -> Result<PathBuf> {
+    // Generate a unique socket path in /tmp
+    let session_id = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .context("Failed to get system time")?
+        .as_nanos();
+    let socket_path = PathBuf::from(format!("/tmp/bw-gemini-proxy-{}.sock", session_id));
+
+    // Load configuration
+    let config = ConfigLoader::load_or_default(config_path.clone())
+        .context("Failed to load proxy configuration")?;
+
+    // Create proxy server
+    let proxy_config = ProxyServerConfig {
+        socket_path: socket_path.clone(),
+        network_config: Arc::new(config.network),
+        policy_engine: None, // Default to open mode
+        learning_recorder: None,
+    };
+
+    let proxy = ProxyServer::new(proxy_config);
+
+    // Spawn as async task (will run until bw-gemini exits)
+    tokio::spawn(async move {
+        if let Err(e) = proxy.start().await {
+            tracing::error!("Proxy server error: {}", e);
+        }
+    });
+
+    // Wait a bit for the socket to be created
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    Ok(socket_path)
 }
