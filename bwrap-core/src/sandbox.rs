@@ -196,7 +196,7 @@ impl SandboxBuilder {
 
             tracing::debug!("Mounting bw-relay from: {:?}", relay_path);
             self.mounts
-                .push(MountPoint::ro(&relay_path, &PathBuf::from("/usr/local/bin/bw-relay")));
+                .push(MountPoint::ro(&relay_path, &PathBuf::from("/bw-relay")));
         }
 
         Ok(())
@@ -238,7 +238,8 @@ impl SandboxBuilder {
         for dir_name in SAFE_HOME_DIRS {
             let dir_path = home.join(dir_name);
             if dir_path.exists() {
-                self.mounts.push(MountPoint::ro(&dir_path, &dir_path));
+                // Use ro_try to skip if mount fails (e.g., permission issues)
+                self.mounts.push(MountPoint::ro_try(&dir_path, &dir_path));
             }
         }
         Ok(())
@@ -249,7 +250,8 @@ impl SandboxBuilder {
         for subdir in SAFE_CONFIG_DIRS {
             let subdir_path = config_dir.join(subdir);
             if subdir_path.exists() {
-                self.mounts.push(MountPoint::ro(&subdir_path, &subdir_path));
+                // Use ro_try to skip if mount fails (e.g., permission issues)
+                self.mounts.push(MountPoint::ro_try(&subdir_path, &subdir_path));
             }
         }
         Ok(())
@@ -324,17 +326,18 @@ impl SandboxBuilder {
         cmd.args(self.env_builder.to_args());
 
         // Shell or CLI command
-        // In Filtered mode, execute bw-relay with the target command
-        if let NetworkMode::Filtered { proxy_socket, .. } = &self.config.network_mode {
+        // Shell takes priority over proxy relay
+        if self.config.shell {
+            cmd.arg("/bin/sh").arg("-i");
+        } else if let NetworkMode::Filtered { proxy_socket, .. } = &self.config.network_mode {
+            // In Filtered mode, execute bw-relay with the target command
             let relay_args = crate::startup_script::build_relay_command(
                 proxy_socket,
-                &PathBuf::from("/usr/local/bin/bw-relay"),
+                &PathBuf::from("/bw-relay"),
                 &self.config.tool_config.cli_path,
                 &self.config.tool_config.cli_args,
             );
             cmd.args(relay_args);
-        } else if self.config.shell {
-            cmd.arg("/bin/sh").arg("-i");
         } else {
             cmd.arg(&self.config.tool_config.cli_path);
             cmd.args(&self.config.tool_config.default_args);

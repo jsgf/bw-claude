@@ -45,12 +45,12 @@ mod tests {
 
         let cmd = build_relay_command(
             &PathBuf::from("/proxy.sock"),
-            &PathBuf::from("/usr/local/bin/bw-relay"),
+            &PathBuf::from("/bw-relay"),
             &PathBuf::from("/usr/bin/claude"),
             &["arg1".to_string(), "arg2".to_string()],
         );
 
-        assert_eq!(cmd[0], "/usr/local/bin/bw-relay");
+        assert_eq!(cmd[0], "/bw-relay");
         assert_eq!(cmd[1], "--socket");
         assert_eq!(cmd[2], "/proxy.sock");
         assert_eq!(cmd[3], "--");

@@ -39,8 +39,9 @@ pub struct CommonArgs {
     pub pass_env_vars: Vec<String>,
 
     /// Enable filtered proxy mode for fine-grained network control
+    /// (implies network enabled with SOCKS5 filtering)
     #[arg(long)]
-    pub use_filter_proxy: bool,
+    pub proxy: bool,
 
     /// Proxy configuration file (TOML format)
     #[arg(long, value_name = "PATH")]

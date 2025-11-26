@@ -25,11 +25,18 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(if args.common.verbose { "debug" } else { "warn" })
-        .with_writer(std::io::stderr)
-        .init();
+    // Initialize logging - only if BW_LOG env var or verbose flag
+    if args.common.verbose || env::var("BW_LOG").is_ok() {
+        tracing_subscriber::fmt()
+            .with_env_filter(env::var("BW_LOG").unwrap_or_else(|_| "debug".to_string()))
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     // Get Gemini CLI path
     let gemini_path = get_gemini_path()?;
@@ -53,9 +60,12 @@ async fn main() -> Result<()> {
         env::current_dir().context("Failed to get current directory")?
     };
 
-    // Handle proxy lifecycle if needed
-    // The proxy runs as an async task spawned within create_proxy_task
-    let network_mode = if args.common.use_filter_proxy {
+    // Handle network mode and proxy
+    // --proxy and --no-network are mutually exclusive
+    let network_mode = if args.common.proxy && args.common.no_network {
+        anyhow::bail!("--proxy and --no-network are mutually exclusive");
+    } else if args.common.proxy {
+        // --proxy enables filtered network with SOCKS5
         let socket_path = create_proxy_task(&args.common.proxy_config, args.common.verbose).await?;
         NetworkMode::Filtered {
             proxy_socket: socket_path,

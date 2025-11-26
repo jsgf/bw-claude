@@ -17,7 +17,6 @@ pub const SAFE_HOME_DIRS: &[&str] = &[
     ".m2",
     ".nvm",
     ".go",
-    ".viminfo",
     ".gitconfig",
 ];
 
