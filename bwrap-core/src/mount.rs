@@ -31,6 +31,9 @@ pub enum MountMode {
     /// Tmpfs mount
     Tmpfs,
 
+    /// Remount an existing mount as read-only
+    RemountRo,
+
     /// Symlink
     Symlink { target: PathBuf },
 }
@@ -72,6 +75,15 @@ impl MountPoint {
         }
     }
 
+    /// Remount an existing mount as read-only
+    pub fn remount_ro<P: AsRef<Path>>(target: P) -> Self {
+        Self {
+            source: PathBuf::new(),
+            target: target.as_ref().to_path_buf(),
+            mode: MountMode::RemountRo,
+        }
+    }
+
     /// Create a symlink
     pub fn symlink<P: AsRef<Path>>(link_target: P, link_path: P) -> Self {
         Self {
@@ -109,6 +121,9 @@ impl MountPoint {
             }
             MountMode::Tmpfs => {
                 vec!["--tmpfs".into(), self.target.clone().into()]
+            }
+            MountMode::RemountRo => {
+                vec!["--remount-ro".into(), self.target.clone().into()]
             }
             MountMode::Symlink { target } => {
                 vec![

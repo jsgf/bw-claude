@@ -27,10 +27,18 @@ pub const SAFE_CONFIG_DIRS: &[&str] = &[
 ];
 
 /// Essential /etc files to mount (minimal /etc)
-pub const ESSENTIAL_ETC_FILES: &[&str] = &["hostname", "hosts", "resolv.conf", "passwd", "group"];
+pub const ESSENTIAL_ETC_FILES: &[&str] = &[
+    "hostname",
+    "hosts",
+    "resolv.conf",
+    "passwd",
+    "group",
+    "timezone",
+    "localtime",
+];
 
-/// Additional directories to mount from /etc
-pub const ESSENTIAL_ETC_DIRS: &[&str] = &["pki", "ssl", "crypto-policies"];
+/// Essential /etc directories to mount from /etc
+pub const ESSENTIAL_ETC_DIRS: &[&str] = &["pki", "ssl", "crypto-policies", "terminfo"];
 
 /// Complete sandbox configuration
 #[derive(Debug, Clone)]

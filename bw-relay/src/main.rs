@@ -6,12 +6,8 @@ mod http_connect;
 
 #[derive(Parser, Debug)]
 #[command(name = "bw-relay")]
-#[command(about = "Network relay for bw-claude sandbox - bridges localhost proxies to UDS")]
+#[command(about = "HTTP CONNECT relay for bw-claude sandbox - bridges HTTP CONNECT proxies to UDS")]
 struct Args {
-    /// SOCKS5 listening port
-    #[arg(long, default_value = "1080")]
-    socks_port: u16,
-
     /// HTTP CONNECT listening port
     #[arg(long, default_value = "3128")]
     http_port: u16,
@@ -48,17 +44,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tracing::info!(
-        "Starting bw-relay: SOCKS5 on :{}, HTTP on :{}, UDS at {:?}",
-        args.socks_port,
+        "Starting bw-relay: HTTP on :{}, UDS at {:?}",
         args.http_port,
         args.socket
     );
-
-    // Spawn SOCKS5 server
-    let uds_path_socks = args.socket.clone();
-    let socks_handle = tokio::spawn(async move {
-        run_socks5_server("127.0.0.1", args.socks_port, &uds_path_socks).await
-    });
 
     // Spawn HTTP server
     let uds_path_http = args.socket.clone();
@@ -75,27 +64,18 @@ async fn main() -> anyhow::Result<()> {
 
         // Set up proxy environment variables
         let http_proxy = format!("http://127.0.0.1:{}", args.http_port);
-        let socks_server = format!("127.0.0.1:{}", args.socks_port);
 
         // Execute the target command with proxy env vars
-        let status = execute_command(&args.target_command, &http_proxy, &socks_server)?;
+        let status = execute_command(&args.target_command, &http_proxy)?;
 
-        // Drop the handles to stop the servers
-        socks_handle.abort();
+        // Drop the handle to stop the server
         http_handle.abort();
 
         std::process::exit(status.code().unwrap_or(1));
     }
 
-    // If no target command, wait for servers to run forever
-    tokio::select! {
-        res = socks_handle => {
-            res??
-        },
-        res = http_handle => {
-            res??
-        },
-    };
+    // If no target command, wait for the server to run forever
+    http_handle.await??;
 
     Ok(())
 }
@@ -106,8 +86,8 @@ async fn main() -> anyhow::Result<()> {
 /// (SIGTERM, SIGINT, etc.) will be delivered to both parent and child.
 /// The child's exit status is propagated back to the caller.
 ///
-/// Sets proxy environment variables for the child process via Command builder.
-fn execute_command(cmd_parts: &[String], http_proxy: &str, socks_server: &str) -> anyhow::Result<std::process::ExitStatus> {
+/// Sets HTTP proxy environment variables for the child process via Command builder.
+fn execute_command(cmd_parts: &[String], http_proxy: &str) -> anyhow::Result<std::process::ExitStatus> {
     if cmd_parts.is_empty() {
         anyhow::bail!("No command provided");
     }
@@ -122,8 +102,6 @@ fn execute_command(cmd_parts: &[String], http_proxy: &str, socks_server: &str) -
     cmd.env("http_proxy", http_proxy);
     cmd.env("HTTPS_PROXY", http_proxy);
     cmd.env("https_proxy", http_proxy);
-    cmd.env("SOCKS5_SERVER", socks_server);
-    cmd.env("socks5_server", socks_server);
 
     // Inherit stdio from parent so output goes to console
     cmd.stdin(std::process::Stdio::inherit());
@@ -135,148 +113,6 @@ fn execute_command(cmd_parts: &[String], http_proxy: &str, socks_server: &str) -
     let status = child.wait()?;
 
     Ok(status)
-}
-
-async fn run_socks5_server(host: &str, port: u16, uds_path: &PathBuf) -> anyhow::Result<()> {
-    let addr = format!("{}:{}", host, port)
-        .parse::<std::net::SocketAddr>()?;
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("SOCKS5 server listening on {}", addr);
-
-    let uds_path = uds_path.clone();
-    loop {
-        let (socket, peer_addr) = listener.accept().await?;
-        tracing::debug!("SOCKS5 client connected: {}", peer_addr);
-
-        let uds_path = uds_path.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_socks5_client(socket, &uds_path).await {
-                tracing::warn!("Error handling SOCKS5 client {}: {}", peer_addr, e);
-            }
-        });
-    }
-}
-
-async fn handle_socks5_client(mut client: tokio::net::TcpStream, uds_path: &PathBuf) -> anyhow::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    // Read SOCKS5 greeting
-    let mut buf = [0u8; 256];
-    let n = client.read(&mut buf).await?;
-
-    if n < 2 || buf[0] != 5 {
-        anyhow::bail!("Invalid SOCKS5 greeting");
-    }
-
-    // Send back "no authentication required" (method 0)
-    client.write_all(&[5, 0]).await?;
-
-    // Read CONNECT request
-    let n = client.read(&mut buf).await?;
-    if n < 4 || buf[0] != 5 || buf[1] != 1 {
-        client.write_all(&[5, 1]).await?; // General SOCKS server failure
-        anyhow::bail!("Invalid SOCKS5 request");
-    }
-
-    // Parse address
-    let addr_type = buf[3];
-    let (host, port_offset) = match addr_type {
-        1 => {
-            // IPv4
-            if n < 10 {
-                anyhow::bail!("Invalid IPv4 address");
-            }
-            let host = format!("{}.{}.{}.{}", buf[4], buf[5], buf[6], buf[7]);
-            (host, 8)
-        }
-        3 => {
-            // Domain name
-            let len = buf[4] as usize;
-            if n < 5 + len + 2 {
-                anyhow::bail!("Invalid domain name");
-            }
-            let host = String::from_utf8(buf[5..5 + len].to_vec())?;
-            (host, 5 + len)
-        }
-        4 => {
-            // IPv6
-            if n < 22 {
-                anyhow::bail!("Invalid IPv6 address");
-            }
-            let host = format!(
-                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
-                buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
-                buf[12], buf[13], buf[14], buf[15], buf[16], buf[17], buf[18], buf[19]
-            );
-            (host, 20)
-        }
-        _ => {
-            client.write_all(&[5, 8]).await?; // Address type not supported
-            anyhow::bail!("Unsupported address type");
-        }
-    };
-
-    let port = u16::from_be_bytes([buf[port_offset], buf[port_offset + 1]]);
-
-    tracing::info!("SOCKS5 CONNECT request: {}:{}", host, port);
-
-    // Connect to bw-proxy via UDS and forward request
-    match forward_to_proxy(&mut client, uds_path, &host, port).await {
-        Ok(_) => {
-            // Proxy handling took over - connection is now tunneling
-            Ok(())
-        }
-        Err(e) => {
-            tracing::warn!("Failed to forward to proxy: {}", e);
-            client.write_all(&[5, 1]).await?; // General SOCKS server failure
-            Err(e)
-        }
-    }
-}
-
-async fn forward_to_proxy(
-    client: &mut tokio::net::TcpStream,
-    uds_path: &PathBuf,
-    host: &str,
-    port: u16,
-) -> anyhow::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::UnixStream;
-
-    // Connect to bw-proxy
-    let mut proxy = UnixStream::connect(uds_path).await?;
-
-    // Forward the SOCKS5 CONNECT request to proxy
-    // For now, use a simple format: "CONNECT host port\n"
-    // TODO: Use proper SOCKS5 protocol to bw-proxy
-
-    let request = format!("CONNECT {} {}\n", host, port);
-    proxy.write_all(request.as_bytes()).await?;
-    proxy.flush().await?;
-
-    // Read response from proxy
-    let mut response = [0u8; 256];
-    let n = proxy.read(&mut response).await?;
-
-    if n == 0 {
-        anyhow::bail!("No response from proxy");
-    }
-
-    let response_str = String::from_utf8_lossy(&response[..n]);
-    if response_str.starts_with("OK") {
-        // Send SOCKS5 success response to client
-        let mut reply = vec![5, 0, 0, 1]; // version, success, reserved, IPv4
-        reply.extend_from_slice(&[127, 0, 0, 1]); // 127.0.0.1
-        reply.extend_from_slice(&port.to_be_bytes());
-        client.write_all(&reply).await?;
-
-        // TODO: Implement bidirectional tunneling between client and proxy
-        // For now, just keep connection open
-        Ok(())
-    } else {
-        anyhow::bail!("Proxy connection failed: {}", response_str);
-    }
 }
 
 async fn run_http_server(host: &str, port: u16, uds_path: &PathBuf) -> anyhow::Result<()> {

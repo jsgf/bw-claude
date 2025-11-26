@@ -1,14 +1,11 @@
 # Bugs and TODO
 
-Delete things from here when complete
+## Completed Fixes
+- ✅ /etc/ is writable → Fixed: Now using bwrap's `--remount-ro /etc` after mounting essential files
+- ✅ add timezone files → Fixed: Added "timezone" and "localtime" to ESSENTIAL_ETC_FILES
+- ✅ working dir should be RW by default → Fixed: Changed from read-only to read-write mount
+- ✅ allow relative paths for --allow-ro/rw → Fixed: Added relative path resolution relative to target_dir
+- ✅ don't assume bw-relay is in /usr/local/bin → Fixed: Now searches same directory as current exe and in PATH
 
-## Bugs
-- /etc/ is writable. Use --perms to make RO? Or --bind-ro a skeleton dir?
-  - do we need /root? Why rw?
-- add timezone files
-- working dir should be RW by default
-- allow relative paths for --allow-ro/rw (relative to . / --dir)
-- don't assume bw-relay is in /usr/local/bin
-  - maybe all executables should be the same and use arg[0] as 
-
-> Note: In a general sandbox, if you don't use --new-session, it is recommended to use seccomp to disallow the TIOCSTI ioctl, otherwise the application can feed keyboard input to the terminal which can e.g. lead to out-of-sandbox command execution (see CVE-2017-5226).
+## Security Notes
+- Consider using seccomp to disallow the TIOCSTI ioctl if not using --new-session, to prevent applications from feeding keyboard input to the terminal (CVE-2017-5226)

@@ -40,7 +40,7 @@ impl ProxyServer {
             .map_err(|e| crate::error::ProxyError::from(e))?;
 
         info!(
-            "SOCKS5 proxy listening on {:?}",
+            "Proxy listening on {:?}",
             self.config.socket_path
         );
 

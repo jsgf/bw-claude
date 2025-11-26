@@ -142,40 +142,36 @@ impl SandboxBuilder {
                 .push(MountPoint::rw(&dot_file_path, &dot_file_path));
         }
 
-        // Project directory (read-only)
+        // Project directory (read-write by default)
         self.mounts
-            .push(MountPoint::ro(&self.config.target_dir, &self.config.target_dir));
-
-        // Project .tool_name directory (read-write)
-        let project_tool_dir = self
-            .config
-            .target_dir
-            .join(format!(".{}", self.config.tool_name));
-        if !project_tool_dir.exists() {
-            fs::create_dir_all(&project_tool_dir)?;
-        }
-        self.mounts
-            .push(MountPoint::rw(&project_tool_dir, &project_tool_dir));
+            .push(MountPoint::rw(&self.config.target_dir, &self.config.target_dir));
 
         // Process and device access
         self.mounts.push(MountPoint::ro("/proc", "/proc")); // Use --proc instead
         self.mounts.push(MountPoint::rw("/dev", "/dev")); // Use --dev-bind instead
 
-        // Root filesystem setup
-        self.mounts.push(MountPoint::tmpfs("/root"));
-
-        // Additional mount paths
+        // Additional mount paths (support relative paths)
         for path in &self.config.additional_ro_paths {
-            if path.exists() {
-                self.mounts.push(MountPoint::ro(path, path));
+            let resolved_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                self.config.target_dir.join(path)
+            };
+            if resolved_path.exists() {
+                self.mounts.push(MountPoint::ro(&resolved_path, &resolved_path));
             } else if self.config.verbose {
                 tracing::warn!("--allow-ro path does not exist: {}", path.display());
             }
         }
 
         for path in &self.config.additional_rw_paths {
-            if path.exists() {
-                self.mounts.push(MountPoint::rw(path, path));
+            let resolved_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                self.config.target_dir.join(path)
+            };
+            if resolved_path.exists() {
+                self.mounts.push(MountPoint::rw(&resolved_path, &resolved_path));
             } else if self.config.verbose {
                 tracing::warn!("--allow-rw path does not exist: {}", path.display());
             }
@@ -195,16 +191,29 @@ impl SandboxBuilder {
                 }
                 explicit_path.clone()
             } else {
-                // Default: use same directory as current executable, with filename "bw-relay"
-                let default = std::env::current_exe()
-                    .ok()
-                    .and_then(|exe_path| exe_path.parent().map(|p| p.to_path_buf()))
-                    .map(|dir| dir.join("bw-relay"))
-                    .unwrap_or_else(|| PathBuf::from("/usr/local/bin/bw-relay"));
+                // Try to find bw-relay in common locations
+                let mut candidates = Vec::new();
 
-                if !default.exists() {
-                    return Err(SandboxError::CliNotFound(default))?;
+                // 1. Same directory as current executable
+                if let Ok(exe_path) = std::env::current_exe() {
+                    if let Some(parent) = exe_path.parent() {
+                        candidates.push(parent.join("bw-relay"));
+                    }
                 }
+
+                // 2. Search in PATH
+                if let Ok(path_env) = std::env::var("PATH") {
+                    for path_dir in path_env.split(':') {
+                        candidates.push(PathBuf::from(path_dir).join("bw-relay"));
+                    }
+                }
+
+                // Find first existing candidate
+                let default = candidates
+                    .into_iter()
+                    .find(|p| p.exists())
+                    .ok_or_else(|| SandboxError::CliNotFound(PathBuf::from("bw-relay")))?;
+
                 default
             };
 
@@ -244,6 +253,9 @@ impl SandboxBuilder {
             self.mounts
                 .push(MountPoint::ro_try(&real_resolv, &PathBuf::from("/etc/resolv.conf")));
         }
+
+        // Remount /etc as read-only to prevent processes from creating new files
+        self.mounts.push(MountPoint::remount_ro("/etc"));
 
         Ok(())
     }
