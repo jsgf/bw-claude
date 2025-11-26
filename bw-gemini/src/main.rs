@@ -26,17 +26,18 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging - only if BW_LOG env var or verbose flag
-    if args.common.verbose || env::var("BW_LOG").is_ok() {
+    let _ = if args.common.verbose || env::var("BW_LOG").is_ok() {
+        let filter = env::var("BW_LOG").unwrap_or_else(|_| "debug".to_string());
         tracing_subscriber::fmt()
-            .with_env_filter(env::var("BW_LOG").unwrap_or_else(|_| "debug".to_string()))
+            .with_env_filter(filter)
             .with_writer(std::io::stderr)
-            .init();
+            .try_init()
     } else {
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::ERROR)
             .with_writer(std::io::stderr)
-            .init();
-    }
+            .try_init()
+    };
 
     // Get Gemini CLI path
     let gemini_path = get_gemini_path()?;
