@@ -68,6 +68,9 @@ pub struct SandboxConfig {
 
     /// Launch shell instead of tool CLI
     pub shell: bool,
+
+    /// Optional explicit path to bw-relay binary (for filtered proxy mode)
+    pub bw_relay_path: Option<PathBuf>,
 }
 
 /// Tool-specific configuration

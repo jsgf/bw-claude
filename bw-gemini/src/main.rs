@@ -1,7 +1,7 @@
 //! Bubblewrap sandboxing wrapper for Gemini CLI
 
 use anyhow::{Context, Result};
-use bwrap_core::{HomeAccessMode, NetworkMode, SandboxBuilder, SandboxConfig, ToolConfig};
+use bwrap_core::{CommonArgs, HomeAccessMode, NetworkMode, SandboxBuilder, SandboxConfig, ToolConfig};
 use bwrap_proxy::{ConfigLoader, ProxyServer, ProxyServerConfig};
 use clap::Parser;
 use std::collections::HashMap;
@@ -17,53 +17,8 @@ use std::time::SystemTime;
     version
 )]
 struct Args {
-    /// Disable network access (default: network enabled)
-    #[arg(long)]
-    no_network: bool,
-
-    /// Allow full home directory access (default: safe dirs only)
-    #[arg(long)]
-    full_home_access: bool,
-
-    /// Print sandbox configuration and bwrap command to stderr
-    #[arg(long, short)]
-    verbose: bool,
-
-    /// Launch an interactive shell in the sandbox (for debugging)
-    #[arg(long)]
-    shell: bool,
-
-    /// Mount additional read-only path (can be used multiple times)
-    #[arg(long = "allow-ro", value_name = "PATH")]
-    allow_ro_paths: Vec<PathBuf>,
-
-    /// Mount additional read-write path (can be used multiple times)
-    #[arg(long = "allow-rw", value_name = "PATH")]
-    allow_rw_paths: Vec<PathBuf>,
-
-    /// Set working directory in sandbox (default: current directory)
-    #[arg(long, value_name = "PATH")]
-    dir: Option<PathBuf>,
-
-    /// Pass an environment variable into the sandbox (can be used multiple times)
-    #[arg(long = "pass-env", value_name = "VAR_NAME")]
-    pass_env_vars: Vec<String>,
-
-    /// Enable filtered proxy mode for fine-grained network control
-    #[arg(long)]
-    use_filter_proxy: bool,
-
-    /// Proxy configuration file (TOML format)
-    #[arg(long, value_name = "PATH")]
-    proxy_config: Option<PathBuf>,
-
-    /// Path to bw-relay binary (for filtered proxy mode)
-    #[arg(long, value_name = "PATH")]
-    bw_relay_path: Option<PathBuf>,
-
-    /// Gemini arguments (use -- to separate from bw-gemini options)
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    cli_args: Vec<String>,
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 #[tokio::main]
@@ -72,7 +27,7 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter(if args.verbose { "debug" } else { "warn" })
+        .with_env_filter(if args.common.verbose { "debug" } else { "warn" })
         .with_writer(std::io::stderr)
         .init();
 
@@ -85,13 +40,13 @@ async fn main() -> Result<()> {
         cli_path: gemini_path,
         home_dot_file: None,
         default_args: vec![],
-        cli_args: args.cli_args,
+        cli_args: args.common.cli_args,
         help_text: "Gemini arguments are passed through unchanged.\n\nFor authentication, you may need to pass environment variables into the sandbox.\nUse the --pass-env argument for each variable you need."
             .to_string(),
     };
 
     // Determine target directory
-    let target_dir = if let Some(dir) = args.dir {
+    let target_dir = if let Some(dir) = args.common.dir {
         dir.canonicalize()
             .context("Failed to canonicalize target directory")?
     } else {
@@ -100,13 +55,13 @@ async fn main() -> Result<()> {
 
     // Handle proxy lifecycle if needed
     // The proxy runs as an async task spawned within create_proxy_task
-    let network_mode = if args.use_filter_proxy {
-        let socket_path = create_proxy_task(&args.proxy_config, args.verbose).await?;
+    let network_mode = if args.common.use_filter_proxy {
+        let socket_path = create_proxy_task(&args.common.proxy_config, args.common.verbose).await?;
         NetworkMode::Filtered {
             proxy_socket: socket_path,
             allowed_domains: vec![],
         }
-    } else if args.no_network {
+    } else if args.common.no_network {
         NetworkMode::Disabled
     } else {
         NetworkMode::Enabled
@@ -118,18 +73,18 @@ async fn main() -> Result<()> {
         tool_config,
         target_dir,
         network_mode,
-        home_access: if args.full_home_access {
+        home_access: if args.common.full_home_access {
             HomeAccessMode::Full
         } else {
             HomeAccessMode::Safe
         },
-        additional_ro_paths: args.allow_ro_paths,
-        additional_rw_paths: args.allow_rw_paths,
+        additional_ro_paths: args.common.allow_ro_paths,
+        additional_rw_paths: args.common.allow_rw_paths,
         env_vars: HashMap::new(),
-        pass_through_env: args.pass_env_vars,
-        verbose: args.verbose,
-        shell: args.shell,
-        bw_relay_path: args.bw_relay_path,
+        pass_through_env: args.common.pass_env_vars,
+        verbose: args.common.verbose,
+        shell: args.common.shell,
+        bw_relay_path: args.common.bw_relay_path,
     };
 
     // Build and execute sandbox

@@ -173,28 +173,30 @@ impl SandboxBuilder {
             self.mounts
                 .push(MountPoint::rw(proxy_socket, &PathBuf::from("/proxy.sock")));
 
-            // Mount bw-relay binary - find it next to current executable
-            let relay_path = std::env::current_exe()
-                .ok()
-                .and_then(|exe_path| exe_path.parent().map(|p| p.to_path_buf()))
-                .ok_or_else(|| {
-                    SandboxError::TmpDirCreation(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Could not determine executable directory",
-                    ))
-                })?
-                .join("bw-relay");
-
-            if relay_path.exists() {
-                self.mounts
-                    .push(MountPoint::ro(&relay_path, &PathBuf::from("/usr/local/bin/bw-relay")));
+            // Determine bw-relay path (REQUIRED for filtered proxy mode)
+            let relay_path = if let Some(explicit_path) = &self.config.bw_relay_path {
+                // Explicit path provided - must exist
+                if !explicit_path.exists() {
+                    return Err(SandboxError::CliNotFound(explicit_path.clone()))?;
+                }
+                explicit_path.clone()
             } else {
-                // Don't fail if bw-relay is not found - it might be in PATH
-                tracing::warn!(
-                    "bw-relay binary not found at {:?}, it may need to be in PATH",
-                    relay_path
-                );
-            }
+                // Default: use same directory as current executable, with filename "bw-relay"
+                let default = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe_path| exe_path.parent().map(|p| p.to_path_buf()))
+                    .map(|dir| dir.join("bw-relay"))
+                    .unwrap_or_else(|| PathBuf::from("/usr/local/bin/bw-relay"));
+
+                if !default.exists() {
+                    return Err(SandboxError::CliNotFound(default))?;
+                }
+                default
+            };
+
+            tracing::debug!("Mounting bw-relay from: {:?}", relay_path);
+            self.mounts
+                .push(MountPoint::ro(&relay_path, &PathBuf::from("/usr/local/bin/bw-relay")));
         }
 
         Ok(())

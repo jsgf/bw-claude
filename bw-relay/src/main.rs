@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing_subscriber::filter::EnvFilter;
 
+mod http_connect;
+
 #[derive(Parser, Debug)]
 #[command(name = "bw-relay")]
 #[command(about = "Network relay for bw-claude sandbox - bridges localhost proxies to UDS")]
@@ -155,8 +157,41 @@ async fn run_http_server(host: &str, port: u16, _uds_path: &PathBuf) -> anyhow::
         let (socket, peer_addr) = listener.accept().await?;
         tracing::debug!("HTTP CONNECT client connected: {}", peer_addr);
 
-        // TODO: Implement HTTP CONNECT protocol handling
-        // For Phase 2, just accept and close
-        drop(socket);
+        // Spawn a task to handle this connection
+        tokio::spawn(async move {
+            if let Err(e) = handle_http_client(socket).await {
+                tracing::warn!("Error handling HTTP client {}: {}", peer_addr, e);
+            }
+        });
     }
+}
+
+/// Handle an HTTP CONNECT client connection
+async fn handle_http_client(mut client: tokio::net::TcpStream) -> anyhow::Result<()> {
+    // Parse the CONNECT request
+    let (host, port) = http_connect::parse_connect_request(&mut client).await?;
+
+    tracing::info!("HTTP CONNECT request to {}:{}", host, port);
+
+    // Try to connect to the destination
+    let remote = match tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::warn!("Failed to connect to {}:{}: {}", host, port, e);
+            http_connect::send_error_response(&mut client, 502, "Bad Gateway").await?;
+            return Ok(());
+        }
+    };
+
+    // Send success response
+    http_connect::send_connect_success(&mut client).await?;
+
+    tracing::debug!("Connection established to {}:{}, starting tunnel", host, port);
+
+    // Tunnel data between client and remote
+    http_connect::tunnel_data(client, remote).await?;
+
+    tracing::debug!("Tunnel closed for {}:{}", host, port);
+
+    Ok(())
 }
