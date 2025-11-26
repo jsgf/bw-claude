@@ -70,11 +70,9 @@ async fn main() -> Result<()> {
     };
 
     // Handle network mode and proxy
-    // --proxy and --no-network are mutually exclusive
-    let network_mode = if args.common.proxy && args.common.no_network {
-        anyhow::bail!("--proxy and --no-network are mutually exclusive");
-    } else if args.common.proxy {
-        // --proxy enables filtered network with SOCKS5
+    // --proxy implies --no-network (disables direct network, forces proxy-only)
+    let network_mode = if args.common.proxy {
+        // --proxy enables filtered network with SOCKS5, disables direct access
         let socket_path = create_proxy_task(&args.common.proxy_config, args.common.verbose).await?;
         NetworkMode::Filtered {
             proxy_socket: socket_path,
