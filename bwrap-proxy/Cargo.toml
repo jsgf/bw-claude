@@ -17,8 +17,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 
-# SOCKS5 and filtering
-fast-socks5 = { workspace = true }
+# Filtering
 ipnet = { workspace = true }
 wildmatch = { workspace = true }
 

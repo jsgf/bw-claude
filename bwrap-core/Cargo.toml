@@ -6,8 +6,11 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+bwrap-proxy = { path = "../bwrap-proxy" }
 clap = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

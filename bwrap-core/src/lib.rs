@@ -8,10 +8,12 @@ pub mod config;
 pub mod env;
 pub mod error;
 pub mod mount;
+pub mod proxy;
 pub mod sandbox;
 pub mod startup_script;
 
 pub use args::CommonArgs;
 pub use config::{HomeAccessMode, NetworkMode, SandboxConfig, ToolConfig};
 pub use error::{Result, SandboxError};
+pub use proxy::create_proxy_task;
 pub use sandbox::{Sandbox, SandboxBuilder};

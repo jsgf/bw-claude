@@ -13,6 +13,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
+/// Format a Command for display
+fn format_command(cmd: &Command) -> String {
+    let program = cmd.get_program().to_string_lossy();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+    if args.is_empty() {
+        program.to_string()
+    } else {
+        format!("{} {}", program, args.join(" "))
+    }
+}
+
 /// Builder for creating a sandbox
 pub struct SandboxBuilder {
     config: SandboxConfig,
@@ -297,7 +311,8 @@ impl SandboxBuilder {
                 cmd.arg("--unshare-net");
             }
             NetworkMode::Filtered { .. } => {
-                cmd.arg("--share-net");
+                // Proxy mode disables direct network access, all traffic goes through proxy
+                cmd.arg("--unshare-net");
             }
         }
 
@@ -326,18 +341,33 @@ impl SandboxBuilder {
         cmd.args(self.env_builder.to_args());
 
         // Shell or CLI command
-        // Shell takes priority over proxy relay
-        if self.config.shell {
-            cmd.arg("/bin/sh").arg("-i");
-        } else if let NetworkMode::Filtered { proxy_socket, .. } = &self.config.network_mode {
+        // Proxy relay must always be used when proxy is enabled
+        if let NetworkMode::Filtered { .. } = &self.config.network_mode {
             // In Filtered mode, execute bw-relay with the target command
+            let (target_binary, target_args) = if self.config.shell {
+                // Pass shell as the target command to bw-relay
+                (PathBuf::from("/bin/sh"), vec!["-i".to_string()])
+            } else {
+                // Pass the CLI tool with its arguments
+                (
+                    self.config.tool_config.cli_path.clone(),
+                    {
+                        let mut args = self.config.tool_config.default_args.clone();
+                        args.extend(self.config.tool_config.cli_args.clone());
+                        args
+                    },
+                )
+            };
+            // bw-relay runs inside the container, so use the in-container socket path
             let relay_args = crate::startup_script::build_relay_command(
-                proxy_socket,
+                &PathBuf::from("/proxy.sock"),
                 &PathBuf::from("/bw-relay"),
-                &self.config.tool_config.cli_path,
-                &self.config.tool_config.cli_args,
+                &target_binary,
+                &target_args,
             );
             cmd.args(relay_args);
+        } else if self.config.shell {
+            cmd.arg("/bin/sh").arg("-i");
         } else {
             cmd.arg(&self.config.tool_config.cli_path);
             cmd.args(&self.config.tool_config.default_args);
@@ -346,11 +376,11 @@ impl SandboxBuilder {
 
         // Print debug info if verbose
         if self.config.verbose {
-            tracing::debug!("Working directory: {}", self.config.target_dir.display());
+            tracing::info!("Working directory: {}", self.config.target_dir.display());
             if let Some(ref tmp_dir) = self.tmp_export_dir {
-                tracing::debug!("Export /tmp: {}", tmp_dir.display());
+                tracing::info!("Export /tmp: {}", tmp_dir.display());
             }
-            tracing::debug!(
+            tracing::info!(
                 "Network: {}",
                 match self.config.network_mode {
                     NetworkMode::Enabled => "enabled",
@@ -358,7 +388,7 @@ impl SandboxBuilder {
                     NetworkMode::Filtered { .. } => "filtered",
                 }
             );
-            tracing::debug!(
+            tracing::info!(
                 "Home access: {}",
                 match self.config.home_access {
                     HomeAccessMode::Safe => "safe (restricted)",
@@ -366,9 +396,9 @@ impl SandboxBuilder {
                 }
             );
             if self.config.shell {
-                tracing::debug!("Mode: Interactive shell");
+                tracing::info!("Mode: Interactive shell");
             }
-            tracing::debug!("Command: {:?}", cmd);
+            tracing::info!("Command: {}", format_command(&cmd));
         }
 
         Ok(cmd)

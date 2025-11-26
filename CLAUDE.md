@@ -1,1 +1,2 @@
-- Project is managed with jj scm, not git
+- IMPORTANT: DO NOT USE `git`. Project is managed with jj scm, not git
+- When formatting a simple variable, use `{varname}`

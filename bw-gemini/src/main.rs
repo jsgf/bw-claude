@@ -1,14 +1,10 @@
 //! Bubblewrap sandboxing wrapper for Gemini CLI
 
 use anyhow::{Context, Result};
-use bwrap_core::{CommonArgs, HomeAccessMode, NetworkMode, SandboxBuilder, SandboxConfig, ToolConfig};
-use bwrap_proxy::{ConfigLoader, ProxyServer, ProxyServerConfig};
+use bwrap_core::{CommonArgs, create_proxy_task, HomeAccessMode, NetworkMode, SandboxBuilder, SandboxConfig, ToolConfig};
 use clap::Parser;
-use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::SystemTime;
 
 #[derive(Parser)]
 #[command(
@@ -27,7 +23,7 @@ async fn main() -> Result<()> {
 
     // Initialize logging - only if BW_LOG env var or verbose flag
     let _ = if args.common.verbose || env::var("BW_LOG").is_ok() {
-        let filter = env::var("BW_LOG").unwrap_or_else(|_| "debug".to_string());
+        let filter = env::var("BW_LOG").unwrap_or_else(|_| "info".to_string());
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
@@ -63,20 +59,24 @@ async fn main() -> Result<()> {
 
     // Handle network mode and proxy
     // --proxy implies --no-network (disables direct network, forces proxy-only)
-    let network_mode = if args.common.proxy {
+    let (network_mode, _proxy_socket) = if args.common.proxy {
         // --proxy enables filtered network with SOCKS5, disables direct access
-        let socket_path = create_proxy_task(&args.common.proxy_config, args.common.verbose).await?;
-        NetworkMode::Filtered {
-            proxy_socket: socket_path,
-            allowed_domains: vec![],
-        }
+        let socket_path = create_proxy_task(&args.common.proxy_config).await?;
+        (
+            NetworkMode::Filtered {
+                proxy_socket: socket_path.clone(),
+                allowed_domains: vec![],
+            },
+            Some(socket_path),
+        )
     } else if args.common.no_network {
-        NetworkMode::Disabled
+        (NetworkMode::Disabled, None)
     } else {
-        NetworkMode::Enabled
+        (NetworkMode::Enabled, None)
     };
 
     // Build sandbox configuration
+    // Note: bw-relay sets proxy env vars, so we don't set them here
     let config = SandboxConfig {
         tool_name: "gemini".to_string(),
         tool_config,
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         },
         additional_ro_paths: args.common.allow_ro_paths,
         additional_rw_paths: args.common.allow_rw_paths,
-        env_vars: HashMap::new(),
+        env_vars: std::collections::HashMap::new(),
         pass_through_env: args.common.pass_env_vars,
         verbose: args.common.verbose,
         shell: args.common.shell,
@@ -130,40 +130,4 @@ fn get_gemini_path() -> Result<PathBuf> {
         "Gemini CLI not found at {:?} or in PATH",
         PathBuf::from(home).join(".local/bin/gemini")
     );
-}
-
-/// Create and spawn the proxy server as an async task
-async fn create_proxy_task(config_path: &Option<PathBuf>, _verbose: bool) -> Result<PathBuf> {
-    // Generate a unique socket path in /tmp
-    let session_id = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .context("Failed to get system time")?
-        .as_nanos();
-    let socket_path = PathBuf::from(format!("/tmp/bw-gemini-proxy-{}.sock", session_id));
-
-    // Load configuration
-    let config = ConfigLoader::load_or_default(config_path.clone())
-        .context("Failed to load proxy configuration")?;
-
-    // Create proxy server
-    let proxy_config = ProxyServerConfig {
-        socket_path: socket_path.clone(),
-        network_config: Arc::new(config.network),
-        policy_engine: None, // Default to open mode
-        learning_recorder: None,
-    };
-
-    let proxy = ProxyServer::new(proxy_config);
-
-    // Spawn as async task (will run until bw-gemini exits)
-    tokio::spawn(async move {
-        if let Err(e) = proxy.start().await {
-            tracing::error!("Proxy server error: {}", e);
-        }
-    });
-
-    // Wait a bit for the socket to be created
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    Ok(socket_path)
 }

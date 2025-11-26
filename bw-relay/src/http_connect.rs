@@ -71,44 +71,6 @@ pub async fn send_error_response(
     Ok(())
 }
 
-/// Tunnel data between client and remote through the proxy socket
-pub async fn tunnel_data(
-    mut client: TcpStream,
-    mut remote: TcpStream,
-) -> anyhow::Result<()> {
-    let (mut client_read, mut client_write) = client.split();
-    let (mut remote_read, mut remote_write) = remote.split();
-
-    tokio::select! {
-        result = async {
-            let mut buf = vec![0u8; 4096];
-            loop {
-                match client_read.read(&mut buf).await? {
-                    0 => break,
-                    n => remote_write.write_all(&buf[..n]).await?,
-                }
-            }
-            Ok::<(), std::io::Error>(())
-        } => {
-            result?;
-        }
-        result = async {
-            let mut buf = vec![0u8; 4096];
-            loop {
-                match remote_read.read(&mut buf).await? {
-                    0 => break,
-                    n => client_write.write_all(&buf[..n]).await?,
-                }
-            }
-            Ok::<(), std::io::Error>(())
-        } => {
-            result?;
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

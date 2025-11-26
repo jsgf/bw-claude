@@ -4,7 +4,7 @@ use crate::filter::{LearningRecorder, PolicyEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// SOCKS5 proxy server configuration
 #[derive(Clone)]
@@ -44,39 +44,111 @@ impl ProxyServer {
             self.config.socket_path
         );
 
+        let mut first_connection = true;
         loop {
             let (socket, _) = listener.accept().await
                 .map_err(|e| crate::error::ProxyError::from(e))?;
+
+            // After accepting the first connection, unlink the socket on the host.
+            // The bind mount inside the container continues to work (kernel keeps inode alive).
+            // This prevents other processes from connecting to this socket.
+            if first_connection {
+                first_connection = false;
+                let _ = std::fs::remove_file(&self.config.socket_path);
+                debug!("Socket unlinked after first connection");
+            }
 
             let config = self.config.clone();
 
             // Spawn a task for each connection
             tokio::spawn(async move {
-                if let Err(e) = handle_client(socket, config).await {
-                    warn!("Error handling client: {}", e);
-                }
+                let _ = handle_client(socket, config).await;
             });
         }
     }
 }
 
-/// Handle a single SOCKS5 client connection
+/// Handle a single client connection over UDS
+///
+/// Currently uses a simple text protocol: "CONNECT host port\n"
+/// TODO: Implement proper SOCKS5 protocol
 async fn handle_client(
-    _stream: tokio::net::UnixStream,
+    mut stream: tokio::net::UnixStream,
     _config: ProxyServerConfig,
 ) -> Result<()> {
-    // For now, just accept the connection and close it
-    // This is a placeholder - full SOCKS5 implementation would parse the protocol here
-    // In Phase 2, bw-relay will handle the SOCKS5 protocol translation
-    // This outside proxy will just receive connections from bw-relay over the UDS
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     debug!("Client connected via Unix domain socket");
 
-    // TODO: Implement SOCKS5 protocol handling
-    // For Phase 1, we're just accepting connections
-    // Phase 2 (bw-relay) will handle actual SOCKS5 protocol
+    // Read the CONNECT request from bw-relay
+    // Format: "CONNECT host port\n" (simple text protocol)
+    // TODO: Use proper SOCKS5 protocol here
+    let mut buf = vec![0u8; 1024];
+    debug!("Reading request from client");
+    let n = stream.read(&mut buf).await?;
+    debug!("Received {} bytes from client", n);
 
-    Ok(())
+    if n == 0 {
+        debug!("No data received from client");
+        return Ok(());
+    }
+
+    let request_str = String::from_utf8_lossy(&buf[..n]);
+    debug!("Raw request: {:?}", request_str);
+    let request_str = request_str.trim();
+    debug!("Trimmed request: {:?}", request_str);
+
+    if !request_str.starts_with("CONNECT ") {
+        debug!("Invalid request format: {:?}", request_str);
+        let _ = stream.write_all(b"ERROR\n").await;
+        return Ok(());
+    }
+
+    // Parse "CONNECT host port"
+    let parts: Vec<&str> = request_str.split_whitespace().collect();
+    debug!("Parsed request parts: {:?}", parts);
+    if parts.len() != 3 {
+        debug!("Invalid request format: expected 3 parts, got {}", parts.len());
+        let _ = stream.write_all(b"ERROR\n").await;
+        return Ok(());
+    }
+
+    let host = parts[1];
+    let port: u16 = match parts[2].parse() {
+        Ok(p) => p,
+        Err(_) => {
+            debug!("Invalid port number: {}", parts[2]);
+            let _ = stream.write_all(b"ERROR\n").await;
+            return Ok(());
+        }
+    };
+
+    debug!("CONNECT request: {}:{}", host, port);
+
+    // Try to connect to the destination
+    debug!("Attempting to connect to {}:{}", host, port);
+    match tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await {
+        Ok(mut remote) => {
+            debug!("Connection succeeded to {}:{}", host, port);
+            // Send success response
+            stream.write_all(b"OK\n").await?;
+            stream.flush().await?;
+
+            // Tunnel data bidirectionally between client and remote
+            if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut remote).await {
+                debug!("Tunnel error: {}", e);
+            }
+
+            debug!("Tunnel closed for {}:{}", host, port);
+            Ok(())
+        }
+        Err(e) => {
+            // Only log remote connection failures at debug level (not failures)
+            debug!("Remote connection failed to {}:{}: {}", host, port, e);
+            let _ = stream.write_all(b"FAIL\n").await;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
