@@ -26,7 +26,44 @@ hosts = ["localhost"]
 ipv4_ranges = ["127.0.0.0/8"]
 ipv6_ranges = ["::1/128"]
 
+[network.groups.rust]
+description = "Rust programming language resources"
+hosts = [
+    "crates.io",
+    "*.crates.io",
+    "docs.rs",
+    "*.docs.rs",
+]
+
+[network.groups.github]
+description = "Github"
+hosts = [
+    "github.com",
+    "*.github.com",
+]
+
 # === Policies ===
+
+[network.policies.lockdown]
+description = "Complete network isolation"
+network = "disabled"
+
+[network.policies.open]
+description = "Full network access without proxy"
+network = "open"
+
+
+[network.policies.allow]
+description = "Allow all network access through proxy"
+network = "proxy"
+default = "allow"
+
+[network.policies.deny]
+description = "Block all network access (useful for learning mode)"
+network = "proxy"
+default = "deny"
+
+# Application-specific policies
 
 [network.policies.claude]
 description = "Allow Anthropic Claude API and analytics"
@@ -40,20 +77,8 @@ network = "proxy"
 default = "deny"
 allow_groups = ["gemini_apis"]
 
-[network.policies.allow]
-description = "Allow all network access through proxy"
-network = "proxy"
-default = "allow"
-
-[network.policies.lockdown]
-description = "Complete network isolation"
-network = "disabled"
-
-[network.policies.open]
-description = "Full network access without proxy"
-network = "open"
-
-[network.policies.block]
-description = "Block all network access (useful for learning mode)"
+[network.policies.shell]
+description = "General shell use"
 network = "proxy"
 default = "deny"
+allow_groups = ["rust", "github"]

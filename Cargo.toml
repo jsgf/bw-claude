@@ -23,10 +23,6 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# SOCKS5 proxy
-fast-socks5 = "0.9"
-tokio-socks = "0.5"
-
 # HTTP proxy
 hyper = { version = "1.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -37,7 +33,7 @@ ipnet = "2.10"
 wildmatch = "2.3"
 
 # Configuration
-toml = "0.8"
+toml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 
 # Async utilities

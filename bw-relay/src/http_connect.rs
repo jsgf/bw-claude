@@ -1,103 +1,66 @@
 //! HTTP CONNECT protocol implementation for transparent proxy tunneling
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use url::Url;
 
-/// Request type: either CONNECT tunneling (HTTPS) or forward proxy (HTTP)
+/// Request type: either CONNECT (HTTPS tunneling) or Forward (HTTP)
 #[derive(Debug, Clone)]
 pub enum RequestType {
     /// CONNECT method for HTTPS tunneling
     Connect { host: String, port: u16 },
     /// Regular HTTP request to be forwarded
-    Forward { host: String, port: u16, request: Vec<u8> },
+    Forward { host: String, port: u16 },
 }
 
-/// Convert HTTP request from absolute-form (http://host/path) to origin-form (/path)
-/// This is needed when forwarding through a tunnel instead of a forward proxy
-fn convert_to_origin_form(request: &[u8]) -> Vec<u8> {
-    let request_str = String::from_utf8_lossy(request);
-    let lines: Vec<&str> = request_str.lines().collect();
-
-    if lines.is_empty() {
-        return request.to_vec();
-    }
-
-    let first_line = lines[0];
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-
-    if parts.len() < 3 {
-        return request.to_vec();
-    }
-
-    let method = parts[0];
-    let url = parts[1];
-    let http_version = parts[2];
-
-    // Convert absolute URL to origin-form
-    let origin_path = if url.starts_with("http://") {
-        // Extract just the path from the URL
-        if let Ok(parsed_url) = Url::parse(url) {
-            let path = parsed_url.path();
-            let query = parsed_url.query().unwrap_or("");
-            if query.is_empty() {
-                path.to_string()
-            } else {
-                format!("{path}?{query}")
-            }
-        } else {
-            url.to_string()
-        }
-    } else if url.starts_with("https://") {
-        // HTTPS absolute form - extract path
-        if let Ok(parsed_url) = Url::parse(url) {
-            let path = parsed_url.path();
-            let query = parsed_url.query().unwrap_or("");
-            if query.is_empty() {
-                path.to_string()
-            } else {
-                format!("{path}?{query}")
-            }
-        } else {
-            url.to_string()
-        }
-    } else {
-        // Already in origin-form
-        url.to_string()
-    };
-
-    // Rebuild the request with origin-form URL
-    let mut result = format!("{method} {origin_path} {http_version}\r\n");
-
-    // Add the rest of the headers
-    for line in &lines[1..] {
-        result.push_str(line);
-        result.push_str("\r\n");
-    }
-
-    result.into_bytes()
-}
-
-/// Parse an HTTP CONNECT request or regular HTTP request
+/// Parse HTTP request from a stream
 ///
 /// Handles two formats:
 /// - CONNECT method (HTTPS tunneling): CONNECT host:port HTTP/1.1\r\n\r\n
 /// - Regular HTTP method (HTTP requests): GET http://host:port/path HTTP/1.1\r\nHost: host\r\n\r\n
+///
+/// Returns: (RequestType, header_bytes, buffered_extra_bytes, stream)
+/// where buffered_extra_bytes contains any data read beyond the headers
 pub async fn parse_connect_request(
-    stream: &mut TcpStream,
-) -> anyhow::Result<(RequestType, Vec<u8>)> {
-    let mut buffer = vec![0u8; 1024];
-    let n = stream.read(&mut buffer).await?;
+    stream: TcpStream,
+) -> anyhow::Result<(RequestType, Vec<u8>, Vec<u8>, TcpStream)> {
+    // Wrap stream in buffered reader (16KB buffer for large headers)
+    let mut reader = BufReader::with_capacity(16384, stream);
+    let mut headers = Vec::new();
 
-    if n == 0 {
-        anyhow::bail!("Connection closed before request received");
+    // Read headers until we find \r\n\r\n (end of headers)
+    loop {
+        let mut line = Vec::new();
+        let n = reader.read_until(b'\n', &mut line).await?;
+
+        if n == 0 {
+            anyhow::bail!("Connection closed before request received");
+        }
+
+        headers.extend_from_slice(&line);
+
+        // Check if we've reached the end of headers
+        if headers.ends_with(b"\r\n\r\n") {
+            break;
+        }
+
+        // Safety limit: 16KB for headers
+        if headers.len() > 16384 {
+            anyhow::bail!("HTTP headers too large (>16KB)");
+        }
     }
 
-    let request_bytes = buffer[..n].to_vec();
-    let request = String::from_utf8_lossy(&request_bytes);
+    // Parse headers to extract request type
+    let headers_str = String::from_utf8_lossy(&headers);
+    let req_type = parse_request_line(&headers_str)?;
 
-    let req_type = parse_request_line(&request)?;
-    Ok((req_type, request_bytes))
+    // Extract any buffered data beyond headers (pipelined data)
+    let buffered_extra = reader.buffer().to_vec();
+
+    // Unwrap the stream to get it back for tunneling
+    let stream = reader.into_inner();
+
+    Ok((req_type, headers, buffered_extra, stream))
 }
 
 /// Parse either a CONNECT request or a regular HTTP request
@@ -132,11 +95,7 @@ fn parse_request_line(request: &str) -> anyhow::Result<RequestType> {
         _ => {
             // Regular HTTP method (GET, POST, etc.)
             let (host, port) = parse_http_request(request)?;
-            Ok(RequestType::Forward {
-                host,
-                port,
-                request: request.as_bytes().to_vec(),
-            })
+            Ok(RequestType::Forward { host, port })
         }
     }
 }
@@ -197,8 +156,7 @@ pub async fn send_error_response(
     message: &str,
 ) -> anyhow::Result<()> {
     let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Length: 0\r\n\r\n",
-        status, message
+        "HTTP/1.1 {status} {message}\r\nContent-Length: 0\r\n\r\n"
     );
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
@@ -212,37 +170,73 @@ mod tests {
     #[test]
     fn test_parse_connect_request() {
         let request = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n";
-        let (host, port) = parse_connect_line(request).unwrap();
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 443);
+        let req_type = parse_request_line(request).unwrap();
+        match req_type {
+            RequestType::Connect { host, port } => {
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 443);
+            }
+            _ => panic!("Expected Connect request type"),
+        }
     }
 
     #[test]
     fn test_parse_connect_with_whitespace() {
         let request = "CONNECT  example.com:8443  HTTP/1.1\r\n\r\n";
-        let (host, port) = parse_connect_line(request).unwrap();
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 8443);
+        let req_type = parse_request_line(request).unwrap();
+        match req_type {
+            RequestType::Connect { host, port } => {
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 8443);
+            }
+            _ => panic!("Expected Connect request type"),
+        }
     }
 
     #[test]
     fn test_parse_connect_invalid_port() {
         let request = "CONNECT example.com:invalid HTTP/1.1\r\n\r\n";
-        let result = parse_connect_line(request);
+        let result = parse_request_line(request);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_connect_no_port() {
         let request = "CONNECT example.com HTTP/1.1\r\n\r\n";
-        let result = parse_connect_line(request);
+        let result = parse_request_line(request);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_connect_wrong_method() {
-        let request = "GET example.com:443 HTTP/1.1\r\n\r\n";
-        let result = parse_connect_line(request);
-        assert!(result.is_err());
+    fn test_parse_http_request() {
+        let request = "GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let req_type = parse_request_line(request).unwrap();
+        match req_type {
+            RequestType::Forward { host, port } => {
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 80);
+            }
+            _ => panic!("Expected Forward request type"),
+        }
+    }
+
+    #[test]
+    fn test_large_headers_parsing() {
+        // Test that we handle large headers correctly
+        let mut large_request = String::from("CONNECT example.com:443 HTTP/1.1\r\n");
+        // Add many headers
+        for i in 0..100 {
+            large_request.push_str(&format!("X-Custom-Header-{i}: value\r\n"));
+        }
+        large_request.push_str("\r\n");
+
+        let req_type = parse_request_line(&large_request).unwrap();
+        match req_type {
+            RequestType::Connect { host, port } => {
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 443);
+            }
+            _ => panic!("Expected Connect request type"),
+        }
     }
 }

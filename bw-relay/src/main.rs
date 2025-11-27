@@ -125,25 +125,25 @@ async fn run_http_server(host: &str, port: u16, uds_path: &PathBuf) -> anyhow::R
     let uds_path = uds_path.clone();
     loop {
         let (socket, peer_addr) = listener.accept().await?;
-        tracing::debug!("HTTP CONNECT client connected: {}", peer_addr);
+        tracing::debug!("HTTP CONNECT client connected: {peer_addr}");
 
         let uds_path = uds_path.clone();
         // Spawn a task to handle this connection
         tokio::spawn(async move {
             if let Err(e) = handle_http_client(socket, &uds_path).await {
-                tracing::warn!("Error handling HTTP client {}: {}", peer_addr, e);
+                tracing::warn!("Error handling HTTP client {peer_addr}: {e}");
             }
         });
     }
 }
 
 /// Handle an HTTP client connection
-async fn handle_http_client(mut client: tokio::net::TcpStream, uds_path: &PathBuf) -> anyhow::Result<()> {
-    // Parse the request
-    let (req_type, _req_bytes) = http_connect::parse_connect_request(&mut client).await?;
+async fn handle_http_client(client: tokio::net::TcpStream, uds_path: &PathBuf) -> anyhow::Result<()> {
+    // Parse the request (consumes client to extract buffered data)
+    let (req_type, headers, buffered_extra, mut client) = http_connect::parse_connect_request(client).await?;
 
     // Forward to bw-proxy via UDS
-    match forward_to_proxy(&mut client, uds_path, req_type).await {
+    match forward_to_proxy(&mut client, uds_path, req_type, headers, buffered_extra).await {
         Ok(_) => {
             tracing::debug!("Request handled");
             Ok(())
@@ -161,6 +161,8 @@ async fn forward_to_proxy(
     client: &mut tokio::net::TcpStream,
     uds_path: &PathBuf,
     req_type: http_connect::RequestType,
+    headers: Vec<u8>,
+    buffered_extra: Vec<u8>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
@@ -173,12 +175,13 @@ async fn forward_to_proxy(
     match req_type {
         http_connect::RequestType::Connect { host, port } => {
             // HTTPS tunneling via CONNECT method
-            let request = format!("CONNECT {host} {port}\n");
-            tracing::debug!("Sending CONNECT request to proxy: {request:?}");
-            proxy.write_all(request.as_bytes()).await?;
+            // Send CONNECT to UDS proxy (space-separated format: CONNECT host port)
+            let proxy_request = format!("CONNECT {host} {port}\n");
+            tracing::debug!("Sending CONNECT to proxy: {proxy_request:?}");
+            proxy.write_all(proxy_request.as_bytes()).await?;
             proxy.flush().await?;
 
-            // Read response from proxy
+            // Read OK/BLOCKED/etc response from proxy
             let mut response = [0u8; 256];
             let n = proxy.read(&mut response).await?;
 
@@ -192,9 +195,15 @@ async fn forward_to_proxy(
                 // Send HTTP 200 Connection Established to client
                 http_connect::send_connect_success(client).await?;
 
-                // Tunnel data bidirectionally between client and proxy
+                // Write any pipelined data (e.g., TLS handshake) to proxy first
+                if !buffered_extra.is_empty() {
+                    tracing::debug!("Writing {len} bytes of pipelined data to proxy", len = buffered_extra.len());
+                    proxy.write_all(&buffered_extra).await?;
+                }
+
+                // Tunnel bidirectionally between client and proxy (unbuffered)
                 tracing::debug!("Starting CONNECT tunnel between client and proxy");
-                tokio::io::copy_bidirectional(&mut *client, &mut proxy).await?;
+                tokio::io::copy_bidirectional(client, &mut proxy).await?;
                 tracing::debug!("Tunnel closed");
 
                 Ok(())
@@ -202,14 +211,14 @@ async fn forward_to_proxy(
                 anyhow::bail!("Proxy rejected CONNECT: {response_str}");
             }
         }
-        http_connect::RequestType::Forward { host, port, request } => {
-            // HTTP forward proxy - same protocol as CONNECT, just different origin
+        http_connect::RequestType::Forward { host, port } => {
+            // HTTP forward proxy - use CONNECT to establish tunnel, then forward request
             let proxy_request = format!("CONNECT {host} {port}\n");
-            tracing::debug!("Sending CONNECT request to proxy for HTTP: {proxy_request:?}");
+            tracing::debug!("Sending CONNECT to proxy for HTTP: {proxy_request:?}");
             proxy.write_all(proxy_request.as_bytes()).await?;
             proxy.flush().await?;
 
-            // Read response from proxy
+            // Read OK/BLOCKED/etc response from proxy
             let mut response = [0u8; 256];
             let n = proxy.read(&mut response).await?;
 
@@ -220,13 +229,19 @@ async fn forward_to_proxy(
             let response_str = String::from_utf8_lossy(&response[..n]);
             tracing::debug!("Proxy response: {response_str:?}");
             if response_str.starts_with("OK") {
-                // For HTTP forward proxy, send the original request then tunnel
-                proxy.write_all(&request).await?;
-                proxy.flush().await?;
+                // Forward the entire HTTP request headers to destination
+                tracing::debug!("Writing {len} bytes of HTTP headers to proxy", len = headers.len());
+                proxy.write_all(&headers).await?;
 
-                // Tunnel remaining data bidirectionally between client and proxy
+                // Write any pipelined request body data to proxy
+                if !buffered_extra.is_empty() {
+                    tracing::debug!("Writing {len} bytes of pipelined body to proxy", len = buffered_extra.len());
+                    proxy.write_all(&buffered_extra).await?;
+                }
+
+                // Tunnel bidirectionally for response and any remaining data
                 tracing::debug!("Starting HTTP forward tunnel between client and proxy");
-                tokio::io::copy_bidirectional(&mut *client, &mut proxy).await?;
+                tokio::io::copy_bidirectional(client, &mut proxy).await?;
                 tracing::debug!("Tunnel closed");
 
                 Ok(())
