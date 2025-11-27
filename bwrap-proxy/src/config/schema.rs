@@ -1,7 +1,7 @@
 //! Configuration schema types
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Complete proxy configuration
@@ -77,9 +77,9 @@ impl Default for ProxyConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct NetworkConfig {
     #[serde(default)]
-    pub groups: HashMap<String, HostGroup>,
+    pub groups: IndexMap<String, HostGroup>,
     #[serde(default)]
-    pub policies: HashMap<String, Policy>,
+    pub policies: IndexMap<String, Policy>,
 }
 
 /// A named group of hosts and IP ranges
@@ -102,18 +102,34 @@ pub struct HostGroup {
     pub groups: Vec<String>,
 }
 
-/// Policy mode: block-by-default or allow-by-default
+/// Network mode: how to handle network access
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum PolicyMode {
-    /// Block by default, only allow listed groups (safer default)
+pub enum NetworkMode {
+    /// Full network access without proxy
+    Open,
+    /// No network access at all
+    Disabled,
+    /// Network access through filtering proxy
+    Proxy,
+}
+
+fn default_network_mode() -> NetworkMode {
+    NetworkMode::Proxy
+}
+
+/// Default behavior when no policy rule matches
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultMode {
+    /// Allow by default (deny-listed access)
     Allow,
-    /// Allow by default, only block listed groups
+    /// Deny by default (allow-listed access)
     Deny,
 }
 
-fn default_policy_mode() -> PolicyMode {
-    PolicyMode::Allow
+fn default_default_mode() -> DefaultMode {
+    DefaultMode::Deny
 }
 
 /// A policy that references groups
@@ -121,21 +137,21 @@ fn default_policy_mode() -> PolicyMode {
 pub struct Policy {
     #[serde(default)]
     pub description: String,
-    /// Groups to allow (used in Allow mode)
+    /// Groups to allow
     #[serde(default)]
     pub allow_groups: Vec<String>,
-    /// Groups to deny (used in Deny mode or as overrides)
+    /// Groups to deny
     #[serde(default)]
     pub deny_groups: Vec<String>,
     /// Backward compatibility: old 'groups' field is alias for allow_groups
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Allow all traffic (bypass all filtering)
-    #[serde(default)]
-    pub allow_all: bool,
-    /// Policy mode: Allow (block-by-default) or Deny (allow-by-default)
-    #[serde(default = "default_policy_mode")]
-    pub mode: PolicyMode,
+    /// Network mode: how to handle network access
+    #[serde(default = "default_network_mode")]
+    pub network: NetworkMode,
+    /// Default behavior on no match
+    #[serde(default = "default_default_mode")]
+    pub default: DefaultMode,
 }
 
 impl Policy {

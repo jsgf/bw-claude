@@ -24,3 +24,6 @@ fast-socks5 = { workspace = true }
 hyper = { version = "1.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+
+# URL parsing
+url = "2"

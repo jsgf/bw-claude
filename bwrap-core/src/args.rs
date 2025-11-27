@@ -64,6 +64,14 @@ pub struct CommonArgs {
     #[arg(long, value_name = "FILE", conflicts_with = "learn")]
     pub learn_deny: Option<PathBuf>,
 
+    /// List available network policies and exit
+    #[arg(long)]
+    pub list_policies: bool,
+
+    /// List available host groups and exit
+    #[arg(long)]
+    pub list_groups: bool,
+
     /// Tool arguments (use -- to separate from bw-* options)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cli_args: Vec<String>,

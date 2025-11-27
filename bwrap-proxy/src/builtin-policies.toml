@@ -29,25 +29,31 @@ ipv6_ranges = ["::1/128"]
 # === Policies ===
 
 [network.policies.claude]
-description = "Default policy for Claude - allows Anthropic API and analytics"
+description = "Allow Anthropic Claude API and analytics"
+network = "proxy"
+default = "deny"
 allow_groups = ["anthropic"]
-mode = "allow"
 
 [network.policies.gemini]
-description = "Default policy for Gemini - allows Google Gemini API"
+description = "Allow Google Gemini API"
+network = "proxy"
+default = "deny"
 allow_groups = ["gemini_apis"]
-mode = "allow"
+
+[network.policies.allow]
+description = "Allow all network access through proxy"
+network = "proxy"
+default = "allow"
 
 [network.policies.lockdown]
-description = "Complete network isolation - only localhost allowed"
-allow_groups = ["localhost"]
-mode = "allow"
+description = "Complete network isolation"
+network = "disabled"
 
 [network.policies.open]
-description = "Marker policy for full network access (no filtering)"
-allow_all = true
+description = "Full network access without proxy"
+network = "open"
 
 [network.policies.block]
-description = "Block all network access - useful for learning mode to record everything"
-allow_groups = []
-mode = "allow"
+description = "Block all network access (useful for learning mode)"
+network = "proxy"
+default = "deny"

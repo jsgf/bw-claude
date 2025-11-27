@@ -2,8 +2,9 @@
 
 use super::schema::{HostGroup, NetworkConfig};
 use crate::error::{Result, ValidationError};
+use indexmap::IndexMap;
 use ipnet::{Ipv4Net, Ipv6Net};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub struct ConfigValidator;
 
@@ -30,7 +31,7 @@ impl ConfigValidator {
     /// DFS-based cycle detection
     fn dfs_cycle_check(
         group_name: &str,
-        groups: &HashMap<String, HostGroup>,
+        groups: &IndexMap<String, HostGroup>,
         visited: &mut HashSet<String>,
         path: &mut Vec<String>,
     ) -> Result<()> {

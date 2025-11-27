@@ -1,0 +1,32 @@
+[common]
+config_version = "1.0"
+verbose = false
+
+[common.proxy]
+default_mode = "restrictive"
+socket_dir = "/tmp"
+learning_output = "~/.config/bw-claude/learned-domains.toml"
+
+[network.groups.learned_session_1764224822_denied]
+description = "learned_session_1764224822_denied"
+hosts = [
+    "play.googleapis.com",
+    "registry.npmjs.org",
+]
+hosts_deny = []
+ipv4_ranges = []
+ipv6_ranges = []
+groups = []
+
+[network.groups.learned_session_1764224879_denied]
+description = "learned_session_1764224879_denied"
+hosts = [
+    "play.googleapis.com",
+    "registry.npmjs.org",
+]
+hosts_deny = []
+ipv4_ranges = []
+ipv6_ranges = []
+groups = []
+
+[network.policies]

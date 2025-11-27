@@ -6,7 +6,7 @@ mod http_connect;
 
 #[derive(Parser, Debug)]
 #[command(name = "bw-relay")]
-#[command(about = "HTTP CONNECT relay for bw-claude sandbox - bridges HTTP CONNECT proxies to UDS")]
+#[command(about = "HTTP relay for bw-claude sandbox - forwards HTTP/HTTPS to policy proxy via UDS")]
 struct Args {
     /// HTTP CONNECT listening port
     #[arg(long, default_value = "3128")]
@@ -120,7 +120,7 @@ async fn run_http_server(host: &str, port: u16, uds_path: &PathBuf) -> anyhow::R
         .parse::<std::net::SocketAddr>()?;
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("HTTP CONNECT server listening on {}", addr);
+    tracing::info!("HTTP proxy listening on {addr}");
 
     let uds_path = uds_path.clone();
     loop {
@@ -137,76 +137,102 @@ async fn run_http_server(host: &str, port: u16, uds_path: &PathBuf) -> anyhow::R
     }
 }
 
-/// Handle an HTTP CONNECT client connection
+/// Handle an HTTP client connection
 async fn handle_http_client(mut client: tokio::net::TcpStream, uds_path: &PathBuf) -> anyhow::Result<()> {
-    // Parse the CONNECT request
-    let (host, port) = http_connect::parse_connect_request(&mut client).await?;
+    // Parse the request
+    let (req_type, _req_bytes) = http_connect::parse_connect_request(&mut client).await?;
 
-    tracing::info!("HTTP CONNECT request to {}:{}", host, port);
-
-    // Forward to bw-proxy via SOCKS5 over UDS
-    match forward_to_proxy_socks5(&mut client, uds_path, &host, port).await {
+    // Forward to bw-proxy via UDS
+    match forward_to_proxy(&mut client, uds_path, req_type).await {
         Ok(_) => {
-            tracing::debug!("Tunnel closed for {}:{}", host, port);
+            tracing::debug!("Request handled");
             Ok(())
         }
         Err(e) => {
-            tracing::warn!("Failed to forward to proxy: {}", e);
+            tracing::warn!("Failed to forward to proxy: {e}");
             http_connect::send_error_response(&mut client, 502, "Bad Gateway").await?;
             Err(e)
         }
     }
 }
 
-/// Forward HTTP CONNECT request to bw-proxy via SOCKS5 over UDS
-async fn forward_to_proxy_socks5(
+/// Forward HTTP request to bw-proxy via UDS
+async fn forward_to_proxy(
     client: &mut tokio::net::TcpStream,
     uds_path: &PathBuf,
-    host: &str,
-    port: u16,
+    req_type: http_connect::RequestType,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
     // Connect to bw-proxy via UDS
-    tracing::debug!("Connecting to proxy at {:?}", uds_path);
+    tracing::debug!("Connecting to proxy at {uds_path:?}");
     let mut proxy = UnixStream::connect(uds_path).await?;
     tracing::debug!("Connected to proxy via UDS");
 
-    // Send SOCKS5 CONNECT request over UDS to proxy
-    // Format: SOCKS5 greeting, then CONNECT request
-    // For simplicity, use a text-based protocol: "CONNECT host port\n"
-    // TODO: Use proper fast-socks5 SOCKS5 protocol
+    match req_type {
+        http_connect::RequestType::Connect { host, port } => {
+            // HTTPS tunneling via CONNECT method
+            let request = format!("CONNECT {host} {port}\n");
+            tracing::debug!("Sending CONNECT request to proxy: {request:?}");
+            proxy.write_all(request.as_bytes()).await?;
+            proxy.flush().await?;
 
-    let request = format!("CONNECT {} {}\n", host, port);
-    tracing::debug!("Sending request to proxy: {:?}", request);
-    proxy.write_all(request.as_bytes()).await?;
-    proxy.flush().await?;
-    tracing::debug!("Request sent to proxy");
+            // Read response from proxy
+            let mut response = [0u8; 256];
+            let n = proxy.read(&mut response).await?;
 
-    // Read response from proxy
-    let mut response = [0u8; 256];
-    tracing::debug!("Waiting for response from proxy");
-    let n = proxy.read(&mut response).await?;
-    tracing::debug!("Received {} bytes from proxy", n);
+            if n == 0 {
+                anyhow::bail!("No response from proxy");
+            }
 
-    if n == 0 {
-        anyhow::bail!("No response from proxy");
-    }
+            let response_str = String::from_utf8_lossy(&response[..n]);
+            tracing::debug!("Proxy response: {response_str:?}");
+            if response_str.starts_with("OK") {
+                // Send HTTP 200 Connection Established to client
+                http_connect::send_connect_success(client).await?;
 
-    let response_str = String::from_utf8_lossy(&response[..n]);
-    tracing::debug!("Proxy response: {:?}", response_str);
-    if response_str.starts_with("OK") {
-        // Send HTTP 200 Connection Established to client
-        http_connect::send_connect_success(client).await?;
+                // Tunnel data bidirectionally between client and proxy
+                tracing::debug!("Starting CONNECT tunnel between client and proxy");
+                tokio::io::copy_bidirectional(&mut *client, &mut proxy).await?;
+                tracing::debug!("Tunnel closed");
 
-        // Tunnel data bidirectionally between client and proxy
-        tracing::debug!("Starting tunnel between client and proxy");
-        tokio::io::copy_bidirectional(&mut *client, &mut proxy).await?;
-        tracing::debug!("Tunnel closed");
+                Ok(())
+            } else {
+                anyhow::bail!("Proxy rejected CONNECT: {response_str}");
+            }
+        }
+        http_connect::RequestType::Forward { host, port, request } => {
+            // HTTP forward proxy - same protocol as CONNECT, just different origin
+            let proxy_request = format!("CONNECT {host} {port}\n");
+            tracing::debug!("Sending CONNECT request to proxy for HTTP: {proxy_request:?}");
+            proxy.write_all(proxy_request.as_bytes()).await?;
+            proxy.flush().await?;
 
-        Ok(())
-    } else {
-        anyhow::bail!("Proxy connection failed: {}", response_str);
+            // Read response from proxy
+            let mut response = [0u8; 256];
+            let n = proxy.read(&mut response).await?;
+
+            if n == 0 {
+                anyhow::bail!("No response from proxy");
+            }
+
+            let response_str = String::from_utf8_lossy(&response[..n]);
+            tracing::debug!("Proxy response: {response_str:?}");
+            if response_str.starts_with("OK") {
+                // For HTTP forward proxy, send the original request then tunnel
+                proxy.write_all(&request).await?;
+                proxy.flush().await?;
+
+                // Tunnel remaining data bidirectionally between client and proxy
+                tracing::debug!("Starting HTTP forward tunnel between client and proxy");
+                tokio::io::copy_bidirectional(&mut *client, &mut proxy).await?;
+                tracing::debug!("Tunnel closed");
+
+                Ok(())
+            } else {
+                anyhow::bail!("Proxy rejected CONNECT for HTTP: {response_str}");
+            }
+        }
     }
 }

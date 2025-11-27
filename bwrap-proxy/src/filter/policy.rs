@@ -3,8 +3,9 @@
 use super::matcher::HostMatcher;
 use crate::config::schema::{HostGroup, NetworkConfig};
 use crate::error::{ProxyError, Result};
+use indexmap::IndexMap;
 use ipnet::{Ipv4Net, Ipv6Net};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 /// Policy engine that evaluates whether connections should be allowed
@@ -13,8 +14,7 @@ use std::net::IpAddr;
 pub struct PolicyEngine {
     allow_matcher: HostMatcher,
     deny_matcher: HostMatcher,
-    mode: crate::config::schema::PolicyMode,
-    allow_all: bool,
+    default: crate::config::schema::DefaultMode,
 }
 
 impl PolicyEngine {
@@ -26,16 +26,6 @@ impl PolicyEngine {
             .ok_or_else(|| ProxyError::PolicyNotFound {
                 policy: policy_name.to_string(),
             })?;
-
-        // If policy allows all, return early
-        if policy.allow_all {
-            return Ok(Self {
-                allow_matcher: HostMatcher::new(),
-                deny_matcher: HostMatcher::new(),
-                mode: policy.mode.clone(),
-                allow_all: true,
-            });
-        }
 
         let mut allow_matcher = HostMatcher::new();
         let mut deny_matcher = HostMatcher::new();
@@ -56,15 +46,14 @@ impl PolicyEngine {
         Ok(Self {
             allow_matcher,
             deny_matcher,
-            mode: policy.mode.clone(),
-            allow_all: false,
+            default: policy.default.clone(),
         })
     }
 
     /// Recursively expand a group and add its hosts/IPs to the matcher (allow patterns)
     fn expand_group(
         group_name: &str,
-        groups: &HashMap<String, HostGroup>,
+        groups: &IndexMap<String, HostGroup>,
         matcher: &mut HostMatcher,
         processed: &mut HashSet<String>,
     ) -> Result<()> {
@@ -111,7 +100,7 @@ impl PolicyEngine {
     /// Recursively expand a group and add its hosts/IPs to the deny matcher
     fn expand_group_deny(
         group_name: &str,
-        groups: &HashMap<String, HostGroup>,
+        groups: &IndexMap<String, HostGroup>,
         matcher: &mut HostMatcher,
         processed: &mut HashSet<String>,
     ) -> Result<()> {
@@ -143,9 +132,7 @@ impl PolicyEngine {
     /// Uses "longest match" logic: when both allow and deny rules match,
     /// the one with highest specificity wins. On a tie, deny wins.
     pub fn allow(&self, host: &str, ip: Option<IpAddr>) -> bool {
-        if self.allow_all {
-            return true;
-        }
+        use crate::config::schema::DefaultMode;
 
         // Check hostname specificity for both allow and deny matchers
         let allow_hostname_spec = self.allow_matcher.matches_with_specificity(host);
@@ -179,26 +166,21 @@ impl PolicyEngine {
                     (true, false) => return true,
                     (false, true) => return false,
                     (false, false) => {
-                        // Neither matched - use policy mode default
-                        // In Allow mode: block by default (return false)
-                        // In Deny mode: allow by default (return true)
-                        return self.mode == crate::config::schema::PolicyMode::Deny;
+                        // Neither matched - use default behavior
+                        // DefaultMode::Allow: allow by default (return true)
+                        // DefaultMode::Deny: deny by default (return false)
+                        return self.default == DefaultMode::Allow;
                     }
                 }
             }
         }
-    }
-
-    /// Check if this policy allows all traffic
-    pub fn is_allow_all(&self) -> bool {
-        self.allow_all
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{HostGroup, NetworkConfig, Policy, PolicyMode};
+    use crate::config::schema::{HostGroup, NetworkConfig, Policy, DefaultMode, NetworkMode};
 
     fn create_test_network() -> NetworkConfig {
         let mut network = NetworkConfig::default();
@@ -236,20 +218,20 @@ mod tests {
                 allow_groups: vec!["anthropic".to_string(), "google".to_string()],
                 deny_groups: vec![],
                 groups: vec![],
-                allow_all: false,
-                mode: PolicyMode::Allow,
+                network: NetworkMode::Proxy,
+                default: DefaultMode::Deny,
             },
         );
 
         network.policies.insert(
-            "open".to_string(),
+            "allow".to_string(),
             Policy {
                 description: "Allow all".to_string(),
                 allow_groups: vec![],
                 deny_groups: vec![],
                 groups: vec![],
-                allow_all: true,
-                mode: PolicyMode::Allow,
+                network: NetworkMode::Proxy,
+                default: DefaultMode::Allow,
             },
         );
 
@@ -270,9 +252,8 @@ mod tests {
     #[test]
     fn test_allow_all_policy() {
         let network = create_test_network();
-        let engine = PolicyEngine::from_policy("open", &network).unwrap();
+        let engine = PolicyEngine::from_policy("allow", &network).unwrap();
 
-        assert!(engine.is_allow_all());
         assert!(engine.allow("anything.com", None));
         assert!(engine.allow("example.org", None));
     }
@@ -321,8 +302,8 @@ mod tests {
                 allow_groups: vec!["extended".to_string()],
                 deny_groups: vec![],
                 groups: vec![],
-                allow_all: false,
-                mode: PolicyMode::Allow,
+                network: NetworkMode::Proxy,
+                default: DefaultMode::Deny,
             },
         );
 

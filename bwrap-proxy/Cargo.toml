@@ -28,6 +28,7 @@ serde = { workspace = true }
 # Utilities
 tokio-util = { workspace = true }
 chrono = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

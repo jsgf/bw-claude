@@ -35,6 +35,30 @@ async fn main() -> Result<()> {
             .try_init()
     };
 
+    // Handle --list-policies and --list-groups flags
+    if args.common.list_policies || args.common.list_groups {
+        let config = bwrap_proxy::ConfigLoader::load_or_default(args.common.proxy_config.clone())
+            .context("Failed to load proxy configuration")?;
+
+        if args.common.list_policies {
+            println!("Available network policies:\n");
+            for (name, policy) in &config.network.policies {
+                println!("  {} - {}", name, policy.description);
+            }
+            println!();
+        }
+
+        if args.common.list_groups {
+            println!("Available host groups:\n");
+            for (name, group) in &config.network.groups {
+                println!("  {} - {}", name, group.description);
+            }
+            println!();
+        }
+
+        return Ok(());
+    }
+
     // Get Gemini CLI path
     let gemini_path = get_gemini_path()?;
 

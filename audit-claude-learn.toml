@@ -1,0 +1,55 @@
+[common]
+config_version = "1.0"
+verbose = false
+
+[common.proxy]
+default_mode = "restrictive"
+socket_dir = "/tmp"
+learning_output = "~/.config/bw-claude/learned-domains.toml"
+
+[network.groups.learned_session_1764224001_denied]
+description = "learned_session_1764224001_denied"
+hosts = [
+    "registry.npmjs.org",
+    "http-intake.logs.datadoghq.com",
+    "www.anthropic.com",
+    "example.com",
+    "amazon.com",
+    "claude.ai",
+    "console.anthropic.com",
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "aws.amazon.com",
+    "google.com",
+    "cloud.google.com",
+    "localhost",
+    "127.0.0.1",
+    "10.0.0.1",
+    "10.255.255.255",
+    "192.168.1.1",
+    "172.16.0.1",
+    "gmail.com",
+    "1.1.1.1",
+    "api-node-1.anthropic.com",
+    "api-node-2.anthropic.com",
+    "inference.anthropic.com",
+    "models.anthropic.com",
+    "content.anthropic.com",
+    "cdn.anthropic.com",
+    "static.anthropic.com",
+    "auth.anthropic.com",
+    "oauth.anthropic.com",
+    "wikipedia.org",
+    "stackoverflow.com",
+    "bing.com",
+    "duckduckgo.com",
+    "archive.org",
+    "pastebin.com",
+]
+hosts_deny = []
+ipv4_ranges = []
+ipv6_ranges = []
+groups = []
+
+[network.policies]

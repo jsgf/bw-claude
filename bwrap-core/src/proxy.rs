@@ -51,9 +51,25 @@ pub async fn create_proxy_task(
     };
 
     // Create LearningRecorder if learning output path is specified
-    // Note: The output path will be used when the recorder is saved
-    let learning_recorder = if learning_output.is_some() {
-        Some(Arc::new(LearningRecorder::new()))
+    // Load existing config file if it exists and set the output path
+    let learning_recorder = if let Some(output_path) = learning_output {
+        let session_name = format!("learned_session_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("Failed to get system time")?
+            .as_secs());
+
+        match LearningRecorder::with_output_path(&session_name, output_path.clone()) {
+            Ok(recorder) => Some(Arc::new(recorder)),
+            Err(e) => {
+                tracing::warn!("Failed to initialize learning recorder with existing file: {e}");
+                // Fall back to a new recorder but still set the output path
+                let recorder = LearningRecorder::new();
+                if let Err(e) = recorder.set_output_path(output_path.clone()) {
+                    tracing::warn!("Failed to set output path for learning recorder: {e}");
+                }
+                Some(Arc::new(recorder))
+            }
+        }
     } else {
         None
     };

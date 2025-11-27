@@ -53,6 +53,20 @@ impl ProxyServer {
             self.config.socket_path
         );
 
+        // Spawn periodic flushing task for learning data
+        if let Some(ref recorder) = self.config.learning_recorder {
+            let recorder_for_flush = recorder.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = recorder_for_flush.flush() {
+                        tracing::error!("Failed to flush learning data: {e}");
+                    }
+                }
+            });
+        }
+
         // Set up signal handlers for graceful shutdown
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -83,14 +97,14 @@ impl ProxyServer {
 
                 // Handle signals for graceful shutdown
                 _ = sigterm.recv() => {
-                    info!("Received SIGTERM, saving learning data and shutting down");
-                    self.save_learning_data();
+                    info!("Received SIGTERM, flushing learning data and shutting down");
+                    self.flush_learning_data();
                     break;
                 }
 
                 _ = sigint.recv() => {
-                    info!("Received SIGINT, saving learning data and shutting down");
-                    self.save_learning_data();
+                    info!("Received SIGINT, flushing learning data and shutting down");
+                    self.flush_learning_data();
                     break;
                 }
             }
@@ -99,15 +113,15 @@ impl ProxyServer {
         Ok(())
     }
 
-    /// Save learning data to file if learning mode is active
-    fn save_learning_data(&self) {
-        if let (Some(ref recorder), Some(ref output_path)) = (&self.config.learning_recorder, &self.config.learning_output) {
-            match recorder.save_to_file(output_path) {
+    /// Flush learning data to file on shutdown
+    fn flush_learning_data(&self) {
+        if let Some(ref recorder) = self.config.learning_recorder {
+            match recorder.flush() {
                 Ok(_) => {
-                    info!("Learning data saved to {:?}", output_path);
+                    info!("Learning data flushed on shutdown");
                 }
                 Err(e) => {
-                    tracing::error!("Failed to save learning data: {}", e);
+                    tracing::error!("Failed to flush learning data on shutdown: {e}");
                 }
             }
         }
@@ -181,18 +195,11 @@ async fn handle_client(
         if !allowed {
             debug!("Connection blocked by policy: {}:{}", host, port);
 
-            // Record denied access in --learn-deny mode
+            // Record denied access in --learn-deny mode (saved on shutdown)
             if let Some(ref learning_recorder) = config.learning_recorder {
                 if let Some(ref mode) = config.learning_mode {
                     if mode == "learn_deny" {
                         learning_recorder.record_denied(host, None);
-
-                        // Save denied data immediately after recording
-                        if let Some(ref output_path) = config.learning_output {
-                            if let Err(e) = learning_recorder.save_denied_to_file(output_path) {
-                                debug!("Failed to save denied data: {}", e);
-                            }
-                        }
                     }
                 }
             }
@@ -208,24 +215,10 @@ async fn handle_client(
         if let Some(ref mode) = config.learning_mode {
             if mode == "learn" || mode != "learn_deny" {
                 learning_recorder.record(host, None);
-
-                // Save learning data immediately after recording
-                if let Some(ref output_path) = config.learning_output {
-                    if let Err(e) = learning_recorder.save_to_file(output_path) {
-                        debug!("Failed to save learning data: {}", e);
-                    }
-                }
             }
         } else {
             // If no learning mode specified but recorder exists, record access (backward compatibility)
             learning_recorder.record(host, None);
-
-            // Save learning data immediately after recording
-            if let Some(ref output_path) = config.learning_output {
-                if let Err(e) = learning_recorder.save_to_file(output_path) {
-                    debug!("Failed to save learning data: {}", e);
-                }
-            }
         }
     }
 
