@@ -43,6 +43,58 @@ impl ConfigLoader {
         Ok(config)
     }
 
+    /// Load built-in configuration embedded in the binary
+    pub fn load_builtin() -> Result<Config> {
+        const BUILTIN_TOML: &str = include_str!("../builtin-policies.toml");
+        let config: Config = toml::from_str(BUILTIN_TOML)?;
+        Ok(config)
+    }
+
+    /// Merge user config on top of built-in config
+    /// User config takes precedence: groups and policies are extended,
+    /// tool-specific settings override built-in
+    pub fn merge_configs(builtin: Config, user: Config) -> Config {
+        let mut merged = builtin;
+
+        // Merge network groups: user groups override/extend built-in
+        for (name, group) in user.network.groups {
+            merged.network.groups.insert(name, group);
+        }
+
+        // Merge network policies: user policies override/extend built-in
+        for (name, policy) in user.network.policies {
+            merged.network.policies.insert(name, policy);
+        }
+
+        // Override common config with user settings
+        merged.common = user.common;
+
+        // Override tool configs if user specified them
+        if user.claude.is_some() {
+            merged.claude = user.claude;
+        }
+        if user.gemini.is_some() {
+            merged.gemini = user.gemini;
+        }
+
+        merged
+    }
+
+    /// Load config with built-in as lowest-priority fallback
+    /// Priority: User config > Built-in config
+    pub fn load_with_builtins() -> Result<Config> {
+        let builtin = Self::load_builtin()?;
+        let path = Self::default_config_path();
+
+        if path.exists() {
+            let user = Self::load_from_file(&path)?;
+            Ok(Self::merge_configs(builtin, user))
+        } else {
+            tracing::debug!("User config not found at {:?}, using built-in defaults", path);
+            Ok(builtin)
+        }
+    }
+
     /// Load config with fallback to defaults
     pub fn load() -> Result<Config> {
         let path = Self::default_config_path();
@@ -55,13 +107,21 @@ impl ConfigLoader {
         }
     }
 
-    /// Load config from optional path or default
+    /// Load config from optional path or default with built-in merge
+    /// Priority: Explicit path > User config > Built-in config
     pub fn load_or_default(path: Option<PathBuf>) -> Result<Config> {
         if let Some(p) = path {
-            Self::load_from_file(&p)
+            let user = Self::load_from_file(&p)?;
+            let builtin = Self::load_builtin()?;
+            Ok(Self::merge_configs(builtin, user))
         } else {
-            Self::load()
+            Self::load_with_builtins()
         }
+    }
+
+    /// Alias for load_or_default for clarity in naming
+    pub fn load_or_builtin(path: Option<PathBuf>) -> Result<Config> {
+        Self::load_or_default(path)
     }
 
     /// Ensure config directory exists

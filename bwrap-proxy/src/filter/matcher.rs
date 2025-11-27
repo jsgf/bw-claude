@@ -67,6 +67,30 @@ impl HostMatcher {
     pub fn is_empty(&self) -> bool {
         self.patterns.is_empty() && self.ipv4_ranges.is_empty() && self.ipv6_ranges.is_empty()
     }
+
+    /// Check if host matches with specificity calculation
+    /// Returns Some(specificity) if matched, None if no match
+    /// Specificity = count of non-wildcard domain elements in the matched hostname
+    pub fn matches_with_specificity(&self, host: &str) -> Option<usize> {
+        let mut max_specificity = None;
+
+        // Check host patterns
+        for pattern in &self.patterns {
+            if pattern.matches(host) {
+                let spec = calculate_hostname_specificity(host);
+                max_specificity = Some(max_specificity.unwrap_or(0).max(spec));
+            }
+        }
+
+        max_specificity
+    }
+}
+
+/// Calculate specificity of a hostname for matching purposes
+/// Specificity = count of non-wildcard domain elements
+/// Example: "api.example.com" = 3, "test.org" = 2
+fn calculate_hostname_specificity(host: &str) -> usize {
+    host.split('.').count()
 }
 
 impl Default for HostMatcher {
@@ -118,5 +142,27 @@ mod tests {
         assert!(matcher.matches("foo.example.com", None));
         assert!(matcher.matches("anything.com", ip));
         assert!(!matcher.matches("other.org", None));
+    }
+
+    #[test]
+    fn test_specificity_matching() {
+        let mut matcher = HostMatcher::new();
+        matcher.add_pattern("*.example.com");
+        matcher.add_pattern("*.api.example.com");
+
+        // More specific pattern should win
+        assert_eq!(matcher.matches_with_specificity("test.api.example.com"), Some(4));
+        assert_eq!(matcher.matches_with_specificity("test.example.com"), Some(3));
+
+        // No match
+        assert_eq!(matcher.matches_with_specificity("other.org"), None);
+    }
+
+    #[test]
+    fn test_hostname_specificity() {
+        assert_eq!(calculate_hostname_specificity("api.example.com"), 3);
+        assert_eq!(calculate_hostname_specificity("test.api.example.com"), 4);
+        assert_eq!(calculate_hostname_specificity("localhost"), 1);
+        assert_eq!(calculate_hostname_specificity("example.com"), 2);
     }
 }

@@ -38,18 +38,25 @@ pub struct CommonArgs {
     #[arg(long = "pass-env", value_name = "VAR_NAME")]
     pub pass_env_vars: Vec<String>,
 
-    /// Enable filtered proxy mode for fine-grained network control
-    /// (implies network enabled with SOCKS5 filtering)
-    #[arg(long)]
-    pub proxy: bool,
-
     /// Proxy configuration file (TOML format)
+    /// Used when --policy or --learn is specified
     #[arg(long, value_name = "PATH")]
     pub proxy_config: Option<PathBuf>,
 
-    /// Path to bw-relay binary (for filtered proxy mode)
+    /// Path to bw-relay binary (for proxy mode)
     #[arg(long, value_name = "PATH")]
     pub bw_relay_path: Option<PathBuf>,
+
+    /// Network policy to enforce (enables HTTP CONNECT proxy filtering)
+    /// Options: "open", "lockdown", "claude", "gemini", or custom policy name
+    #[arg(long, value_name = "NAME")]
+    pub policy: Option<String>,
+
+    /// Learning mode: allow all traffic but record accessed domains
+    /// Records new domains to the specified TOML file for building allow lists
+    /// (enables HTTP CONNECT proxy filtering in open mode)
+    #[arg(long, value_name = "FILE")]
+    pub learn: Option<PathBuf>,
 
     /// Tool arguments (use -- to separate from bw-* options)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

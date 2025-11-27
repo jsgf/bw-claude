@@ -1,0 +1,58 @@
+# Built-in network policies for bw-claude/bw-gemini
+# These are embedded in the binary and provide safe defaults
+# User config can override or extend these policies
+
+[network]
+
+# === Host Groups ===
+
+[network.groups.anthropic]
+description = "Anthropic Claude services"
+hosts = [
+    "*.anthropic.com",
+    "anthropic.com",
+    "*.claude.ai",
+    "claude.ai",
+]
+
+[network.groups.google_apis]
+description = "Google Cloud and API services"
+hosts = [
+    "*.googleapis.com",
+    "googleapis.com",
+    "*.googleusercontent.com",
+]
+
+[network.groups.google_search]
+description = "Google Search"
+hosts = [
+    "*.google.com",
+    "google.com",
+]
+
+[network.groups.localhost]
+description = "Local development servers"
+hosts = ["localhost"]
+ipv4_ranges = ["127.0.0.0/8"]
+ipv6_ranges = ["::1/128"]
+
+# === Policies ===
+
+[network.policies.claude]
+description = "Default policy for Claude - allows Anthropic services and Google search"
+allow_groups = ["anthropic", "google_search"]
+mode = "allow"
+
+[network.policies.gemini]
+description = "Default policy for Gemini - allows Google APIs and search"
+allow_groups = ["google_apis", "google_search"]
+mode = "allow"
+
+[network.policies.lockdown]
+description = "Complete network isolation - only localhost allowed"
+allow_groups = ["localhost"]
+mode = "allow"
+
+[network.policies.open]
+description = "Marker policy for full network access (no filtering)"
+allow_all = true

@@ -8,9 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 /// Policy engine that evaluates whether connections should be allowed
+/// Uses "more specific wins" logic when both allow and deny rules match
 #[derive(Debug, Clone)]
 pub struct PolicyEngine {
-    matcher: HostMatcher,
+    allow_matcher: HostMatcher,
+    deny_matcher: HostMatcher,
+    mode: crate::config::schema::PolicyMode,
     allow_all: bool,
 }
 
@@ -27,21 +30,33 @@ impl PolicyEngine {
         // If policy allows all, return early
         if policy.allow_all {
             return Ok(Self {
-                matcher: HostMatcher::new(),
+                allow_matcher: HostMatcher::new(),
+                deny_matcher: HostMatcher::new(),
+                mode: policy.mode.clone(),
                 allow_all: true,
             });
         }
 
-        let mut matcher = HostMatcher::new();
+        let mut allow_matcher = HostMatcher::new();
+        let mut deny_matcher = HostMatcher::new();
         let mut processed = HashSet::new();
 
-        // Recursively expand all groups referenced by the policy
-        for group_name in &policy.groups {
-            Self::expand_group(group_name, &network.groups, &mut matcher, &mut processed)?;
+        // Recursively expand all groups referenced by the policy's allow groups
+        // Use effective_allow_groups() which handles backward compatibility
+        for group_name in &policy.effective_allow_groups() {
+            Self::expand_group(group_name, &network.groups, &mut allow_matcher, &mut processed)?;
+        }
+
+        // Recursively expand all groups referenced by the policy's deny groups
+        processed.clear();
+        for group_name in &policy.deny_groups {
+            Self::expand_group(group_name, &network.groups, &mut deny_matcher, &mut processed)?;
         }
 
         Ok(Self {
-            matcher,
+            allow_matcher,
+            deny_matcher,
+            mode: policy.mode.clone(),
             allow_all: false,
         })
     }
@@ -94,12 +109,55 @@ impl PolicyEngine {
     }
 
     /// Check if a connection to the given host/IP should be allowed
+    /// Uses "more specific wins" logic: when both allow and deny rules match,
+    /// the one with higher specificity wins. On a tie, deny wins.
     pub fn allow(&self, host: &str, ip: Option<IpAddr>) -> bool {
         if self.allow_all {
             return true;
         }
 
-        self.matcher.matches(host, ip)
+        // Check hostname specificity for both matchers
+        let allow_hostname_spec = self.allow_matcher.matches_with_specificity(host);
+        let deny_hostname_spec = self.deny_matcher.matches_with_specificity(host);
+
+        // Check IP matches (no specificity - either matches or doesn't)
+        let allow_ip_match = ip.map(|a| self.allow_matcher.matches_ip(a)).unwrap_or(false);
+        let deny_ip_match = ip.map(|a| self.deny_matcher.matches_ip(a)).unwrap_or(false);
+
+        // Apply "more specific wins" logic with hostnames taking precedence
+        if let (Some(allow_spec), Some(deny_spec)) = (allow_hostname_spec, deny_hostname_spec) {
+            // Both matched by hostname, more specific wins (deny wins on tie)
+            return allow_spec > deny_spec;
+        }
+
+        if allow_hostname_spec.is_some() {
+            // Only allow matched by hostname
+            return true;
+        }
+
+        if deny_hostname_spec.is_some() {
+            // Only deny matched by hostname
+            return false;
+        }
+
+        // No hostname matches, check IP matches
+        if allow_ip_match && deny_ip_match {
+            // Both matched by IP, deny wins on tie
+            return false;
+        }
+
+        if allow_ip_match {
+            return true;
+        }
+
+        if deny_ip_match {
+            return false;
+        }
+
+        // Neither matched - use policy mode default
+        // In Allow mode: block by default (return false)
+        // In Deny mode: allow by default (return true)
+        self.mode == crate::config::schema::PolicyMode::Deny
     }
 
     /// Check if this policy allows all traffic
@@ -111,7 +169,7 @@ impl PolicyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{HostGroup, NetworkConfig, Policy};
+    use crate::config::schema::{HostGroup, NetworkConfig, Policy, PolicyMode};
 
     fn create_test_network() -> NetworkConfig {
         let mut network = NetworkConfig::default();
@@ -144,8 +202,11 @@ mod tests {
             "claude_default".to_string(),
             Policy {
                 description: "Default Claude policy".to_string(),
-                groups: vec!["anthropic".to_string(), "google".to_string()],
+                allow_groups: vec!["anthropic".to_string(), "google".to_string()],
+                deny_groups: vec![],
+                groups: vec![],
                 allow_all: false,
+                mode: PolicyMode::Allow,
             },
         );
 
@@ -153,8 +214,11 @@ mod tests {
             "open".to_string(),
             Policy {
                 description: "Allow all".to_string(),
+                allow_groups: vec![],
+                deny_groups: vec![],
                 groups: vec![],
                 allow_all: true,
+                mode: PolicyMode::Allow,
             },
         );
 
@@ -221,8 +285,11 @@ mod tests {
             "test".to_string(),
             Policy {
                 description: "Test".to_string(),
-                groups: vec!["extended".to_string()],
+                allow_groups: vec!["extended".to_string()],
+                deny_groups: vec![],
+                groups: vec![],
                 allow_all: false,
+                mode: PolicyMode::Allow,
             },
         );
 

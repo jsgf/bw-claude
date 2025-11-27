@@ -40,14 +40,14 @@ impl LearningRecorder {
         }
     }
 
-    /// Record a host access
+    /// Record a host access (skips if already in existing learned file)
     pub fn record_host(&self, host: &str) {
         if let Ok(mut hosts) = self.hosts.lock() {
             hosts.insert(host.to_string());
         }
     }
 
-    /// Record an IP access
+    /// Record an IP access (skips if already in existing learned file)
     pub fn record_ip(&self, ip: IpAddr) {
         match ip {
             IpAddr::V4(addr) => {
@@ -64,11 +64,61 @@ impl LearningRecorder {
     }
 
     /// Record a connection (both host and IP if available)
+    /// Automatically skips entries already in the learned file
     pub fn record(&self, host: &str, ip: Option<IpAddr>) {
         self.record_host(host);
         if let Some(addr) = ip {
             self.record_ip(addr);
         }
+    }
+
+    /// Load existing domains from a TOML file and return them as a set
+    /// Used to deduplicate against previously learned domains
+    fn load_existing_domains(path: &Path) -> Result<HashSet<String>> {
+        if !path.exists() {
+            return Ok(HashSet::new());
+        }
+
+        let content = fs::read_to_string(path).map_err(ProxyError::from)?;
+        let config: toml::Table = toml::from_str(&content).map_err(ProxyError::from)?;
+
+        let mut existing = HashSet::new();
+
+        // Extract all hosts from all groups in the config
+        if let Some(network) = config.get("network").and_then(|v| v.as_table()) {
+            if let Some(groups) = network.get("groups").and_then(|v| v.as_table()) {
+                for (_group_name, group_value) in groups {
+                    if let Some(group_table) = group_value.as_table() {
+                        // Extract hosts array
+                        if let Some(hosts_array) = group_table.get("hosts").and_then(|v| v.as_array()) {
+                            for host in hosts_array {
+                                if let Some(host_str) = host.as_str() {
+                                    existing.insert(host_str.to_string());
+                                }
+                            }
+                        }
+                        // Extract IPv4 ranges
+                        if let Some(ipv4_array) = group_table.get("ipv4_ranges").and_then(|v| v.as_array()) {
+                            for ip in ipv4_array {
+                                if let Some(ip_str) = ip.as_str() {
+                                    existing.insert(ip_str.to_string());
+                                }
+                            }
+                        }
+                        // Extract IPv6 ranges
+                        if let Some(ipv6_array) = group_table.get("ipv6_ranges").and_then(|v| v.as_array()) {
+                            for ip in ipv6_array {
+                                if let Some(ip_str) = ip.as_str() {
+                                    existing.insert(ip_str.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(existing)
     }
 
     /// Get the session name
@@ -101,16 +151,27 @@ impl LearningRecorder {
 
     /// Save recorded data to a TOML file
     ///
-    /// The data is appended as a new group to the existing config file,
-    /// or creates a minimal config if the file doesn't exist.
+    /// The data is appended as a new group to the existing config file.
+    /// Automatically deduplicates against any existing entries in the file.
+    /// Only new entries discovered in this session are saved.
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
-        let host_group = self.to_host_group();
+        let mut host_group = self.to_host_group();
 
-        // Check if we have any data to save
+        // Load existing domains from the file and filter them out
+        if path.exists() {
+            let existing = Self::load_existing_domains(path)?;
+
+            // Remove any entries that already exist
+            host_group.hosts.retain(|h| !existing.contains(h));
+            host_group.ipv4_ranges.retain(|ip| !existing.contains(ip));
+            host_group.ipv6_ranges.retain(|ip| !existing.contains(ip));
+        }
+
+        // Check if we have any NEW data to save after deduplication
         if host_group.hosts.is_empty()
             && host_group.ipv4_ranges.is_empty()
             && host_group.ipv6_ranges.is_empty() {
-            return Ok(()); // Nothing to save
+            return Ok(()); // Nothing new to save
         }
 
         // Read existing config or create minimal structure
@@ -121,7 +182,7 @@ impl LearningRecorder {
             String::from("[common]\nlog_level = \"info\"\n\n[network]\n\n")
         };
 
-        // Generate the new group section
+        // Generate the new group section (with only new entries)
         let group_section = format!(
             "[network.groups.{}]\n{}{}{}\n",
             self.session_name,

@@ -38,7 +38,23 @@ async fn main() -> Result<()> {
     // Get Gemini CLI path
     let gemini_path = get_gemini_path()?;
 
-    // Build tool configuration
+    // Handle network mode and proxy first (while args.common is still intact)
+    // --proxy or --policy implies --no-network (disables direct network, forces proxy-only)
+    let (network_mode, _proxy_socket) = determine_network_mode(
+        &args.common,
+        &args.common.proxy_config,
+    )
+    .await?;
+
+    // Determine target directory (use reference to avoid moving)
+    let target_dir = if let Some(dir) = args.common.dir.as_ref() {
+        dir.canonicalize()
+            .context("Failed to canonicalize target directory")?
+    } else {
+        env::current_dir().context("Failed to get current directory")?
+    };
+
+    // Build tool configuration (now we can move cli_args)
     let tool_config = ToolConfig {
         name: "gemini".to_string(),
         cli_path: gemini_path,
@@ -47,32 +63,6 @@ async fn main() -> Result<()> {
         cli_args: args.common.cli_args,
         help_text: "Gemini arguments are passed through unchanged.\n\nFor authentication, you may need to pass environment variables into the sandbox.\nUse the --pass-env argument for each variable you need."
             .to_string(),
-    };
-
-    // Determine target directory
-    let target_dir = if let Some(dir) = args.common.dir {
-        dir.canonicalize()
-            .context("Failed to canonicalize target directory")?
-    } else {
-        env::current_dir().context("Failed to get current directory")?
-    };
-
-    // Handle network mode and proxy
-    // --proxy implies --no-network (disables direct network, forces proxy-only)
-    let (network_mode, _proxy_socket) = if args.common.proxy {
-        // --proxy enables filtered network with SOCKS5, disables direct access
-        let socket_path = create_proxy_task(&args.common.proxy_config).await?;
-        (
-            NetworkMode::Filtered {
-                proxy_socket: socket_path.clone(),
-                allowed_domains: vec![],
-            },
-            Some(socket_path),
-        )
-    } else if args.common.no_network {
-        (NetworkMode::Disabled, None)
-    } else {
-        (NetworkMode::Enabled, None)
     };
 
     // Build sandbox configuration
@@ -130,4 +120,49 @@ fn get_gemini_path() -> Result<PathBuf> {
         "Gemini CLI not found at {:?} or in PATH",
         PathBuf::from(home).join(".local/bin/gemini")
     );
+}
+
+/// Determine the network mode based on CLI flags
+/// --policy or --learn enables HTTP CONNECT proxy with filtering
+async fn determine_network_mode(
+    common: &CommonArgs,
+    proxy_config: &Option<PathBuf>,
+) -> Result<(NetworkMode, Option<PathBuf>)> {
+    // Check if proxy should be enabled
+    let use_proxy = common.policy.is_some() || common.learn.is_some();
+
+    if use_proxy {
+        // Determine policy name:
+        // - If --learn is specified, use "open" (allow all, but record)
+        // - Otherwise, use --policy if specified, default to "open"
+        let policy_name = if common.learn.is_some() {
+            "open"
+        } else {
+            common.policy.as_ref().map(|s| s.as_str()).unwrap_or("open")
+        };
+
+        // Learning output: set if --learn is specified
+        let learning_output = common.learn.as_ref();
+
+        // Create proxy task with policy and learning configuration
+        let socket_path = create_proxy_task(
+            proxy_config,
+            Some(policy_name),
+            learning_output,
+        )
+        .await?;
+
+        let network_mode = NetworkMode::Filtered {
+            proxy_socket: socket_path.clone(),
+            policy_name: policy_name.to_string(),
+            learning_output: common.learn.clone(),
+            allowed_domains: vec![], // Deprecated field, kept for compatibility
+        };
+
+        Ok((network_mode, Some(socket_path)))
+    } else if common.no_network {
+        Ok((NetworkMode::Disabled, None))
+    } else {
+        Ok((NetworkMode::Enabled, None))
+    }
 }

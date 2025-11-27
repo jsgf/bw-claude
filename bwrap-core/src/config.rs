@@ -111,9 +111,20 @@ pub enum NetworkMode {
     /// No network access (--unshare-net)
     Disabled,
 
-    /// Filtered network access via SOCKS proxy
+    /// Filtered network access via SOCKS proxy with policy enforcement
     Filtered {
+        /// Path to the SOCKS proxy socket
         proxy_socket: PathBuf,
+
+        /// Name of the policy to enforce (e.g., "claude", "gemini", "lockdown", "open")
+        /// "open" = allow all, "lockdown" = localhost only, other = named policy
+        policy_name: String,
+
+        /// Optional path for learning mode output (records accessed domains)
+        learning_output: Option<PathBuf>,
+
+        /// Kept for backward compatibility (derived from policy)
+        #[deprecated(note = "Use policy_name instead")]
         allowed_domains: Vec<String>,
     },
 }

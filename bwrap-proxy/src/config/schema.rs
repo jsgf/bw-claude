@@ -98,15 +98,51 @@ pub struct HostGroup {
     pub groups: Vec<String>,
 }
 
+/// Policy mode: block-by-default or allow-by-default
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PolicyMode {
+    /// Block by default, only allow listed groups (safer default)
+    Allow,
+    /// Allow by default, only block listed groups
+    Deny,
+}
+
+fn default_policy_mode() -> PolicyMode {
+    PolicyMode::Allow
+}
+
 /// A policy that references groups
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Policy {
     #[serde(default)]
     pub description: String,
+    /// Groups to allow (used in Allow mode)
+    #[serde(default)]
+    pub allow_groups: Vec<String>,
+    /// Groups to deny (used in Deny mode or as overrides)
+    #[serde(default)]
+    pub deny_groups: Vec<String>,
+    /// Backward compatibility: old 'groups' field is alias for allow_groups
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Allow all traffic (bypass all filtering)
     #[serde(default)]
     pub allow_all: bool,
+    /// Policy mode: Allow (block-by-default) or Deny (allow-by-default)
+    #[serde(default = "default_policy_mode")]
+    pub mode: PolicyMode,
+}
+
+impl Policy {
+    /// Get the effective allow groups (combining both old and new fields)
+    pub fn effective_allow_groups(&self) -> Vec<String> {
+        if !self.allow_groups.is_empty() {
+            self.allow_groups.clone()
+        } else {
+            self.groups.clone()  // Backward compatibility
+        }
+    }
 }
 
 /// Tool-specific configuration
@@ -114,7 +150,11 @@ pub struct Policy {
 pub struct ToolConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    pub proxy_mode: String,
+    #[serde(default)]
+    pub proxy_mode: Option<String>,
+    /// Default policy for this tool (e.g., "claude" or "gemini")
+    #[serde(default)]
+    pub default_policy: Option<String>,
 }
 
 fn default_true() -> bool {
