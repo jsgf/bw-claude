@@ -7,27 +7,17 @@
 # === Host Groups ===
 
 [network.groups.anthropic]
-description = "Anthropic Claude services"
+description = "Anthropic Claude API and analytics"
 hosts = [
-    "*.anthropic.com",
-    "anthropic.com",
-    "*.claude.ai",
-    "claude.ai",
+    "api.anthropic.com",
+    "statsig.anthropic.com",
 ]
 
-[network.groups.google_apis]
-description = "Google Cloud and API services"
+[network.groups.gemini_apis]
+description = "Google Gemini API services"
 hosts = [
-    "*.googleapis.com",
-    "googleapis.com",
-    "*.googleusercontent.com",
-]
-
-[network.groups.google_search]
-description = "Google Search"
-hosts = [
-    "*.google.com",
-    "google.com",
+    "oauth2.googleapis.com",
+    "cloudcode-pa.googleapis.com",
 ]
 
 [network.groups.localhost]
@@ -39,13 +29,13 @@ ipv6_ranges = ["::1/128"]
 # === Policies ===
 
 [network.policies.claude]
-description = "Default policy for Claude - allows Anthropic services and Google search"
-allow_groups = ["anthropic", "google_search"]
+description = "Default policy for Claude - allows Anthropic API and analytics"
+allow_groups = ["anthropic"]
 mode = "allow"
 
 [network.policies.gemini]
-description = "Default policy for Gemini - allows Google APIs and search"
-allow_groups = ["google_apis", "google_search"]
+description = "Default policy for Gemini - allows Google Gemini API"
+allow_groups = ["gemini_apis"]
 mode = "allow"
 
 [network.policies.lockdown]
@@ -56,3 +46,8 @@ mode = "allow"
 [network.policies.open]
 description = "Marker policy for full network access (no filtering)"
 allow_all = true
+
+[network.policies.block]
+description = "Block all network access - useful for learning mode to record everything"
+allow_groups = []
+mode = "allow"

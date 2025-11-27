@@ -50,7 +50,7 @@ impl PolicyEngine {
         // Recursively expand all groups referenced by the policy's deny groups
         processed.clear();
         for group_name in &policy.deny_groups {
-            Self::expand_group(group_name, &network.groups, &mut deny_matcher, &mut processed)?;
+            Self::expand_group_deny(group_name, &network.groups, &mut deny_matcher, &mut processed)?;
         }
 
         Ok(Self {
@@ -61,7 +61,7 @@ impl PolicyEngine {
         })
     }
 
-    /// Recursively expand a group and add its hosts/IPs to the matcher
+    /// Recursively expand a group and add its hosts/IPs to the matcher (allow patterns)
     fn expand_group(
         group_name: &str,
         groups: &HashMap<String, HostGroup>,
@@ -79,7 +79,7 @@ impl PolicyEngine {
             group: group_name.to_string(),
         })?;
 
-        // Add host patterns
+        // Add allow host patterns
         for host in &group.hosts {
             matcher.add_pattern(host);
         }
@@ -108,15 +108,46 @@ impl PolicyEngine {
         Ok(())
     }
 
+    /// Recursively expand a group and add its hosts/IPs to the deny matcher
+    fn expand_group_deny(
+        group_name: &str,
+        groups: &HashMap<String, HostGroup>,
+        matcher: &mut HostMatcher,
+        processed: &mut HashSet<String>,
+    ) -> Result<()> {
+        // Avoid reprocessing groups (handles DAG structure)
+        if processed.contains(group_name) {
+            return Ok(());
+        }
+
+        processed.insert(group_name.to_string());
+
+        let group = groups.get(group_name).ok_or_else(|| ProxyError::GroupNotFound {
+            group: group_name.to_string(),
+        })?;
+
+        // Add deny host patterns
+        for host in &group.hosts_deny {
+            matcher.add_deny_pattern(host);
+        }
+
+        // Recursively expand referenced groups (deny patterns)
+        for child_name in &group.groups {
+            Self::expand_group_deny(child_name, groups, matcher, processed)?;
+        }
+
+        Ok(())
+    }
+
     /// Check if a connection to the given host/IP should be allowed
-    /// Uses "more specific wins" logic: when both allow and deny rules match,
-    /// the one with higher specificity wins. On a tie, deny wins.
+    /// Uses "longest match" logic: when both allow and deny rules match,
+    /// the one with highest specificity wins. On a tie, deny wins.
     pub fn allow(&self, host: &str, ip: Option<IpAddr>) -> bool {
         if self.allow_all {
             return true;
         }
 
-        // Check hostname specificity for both matchers
+        // Check hostname specificity for both allow and deny matchers
         let allow_hostname_spec = self.allow_matcher.matches_with_specificity(host);
         let deny_hostname_spec = self.deny_matcher.matches_with_specificity(host);
 
@@ -124,40 +155,38 @@ impl PolicyEngine {
         let allow_ip_match = ip.map(|a| self.allow_matcher.matches_ip(a)).unwrap_or(false);
         let deny_ip_match = ip.map(|a| self.deny_matcher.matches_ip(a)).unwrap_or(false);
 
-        // Apply "more specific wins" logic with hostnames taking precedence
-        if let (Some(allow_spec), Some(deny_spec)) = (allow_hostname_spec, deny_hostname_spec) {
-            // Both matched by hostname, more specific wins (deny wins on tie)
-            return allow_spec > deny_spec;
+        // Apply "longest match wins" logic with deny as tiebreak
+        match (allow_hostname_spec, deny_hostname_spec) {
+            (Some(allow_spec), Some(deny_spec)) => {
+                // Both matched by hostname - more specific wins (deny wins on tie)
+                return allow_spec > deny_spec;
+            }
+            (Some(_), None) => {
+                // Only allow matched by hostname
+                return true;
+            }
+            (None, Some(_)) => {
+                // Only deny matched by hostname
+                return false;
+            }
+            (None, None) => {
+                // No hostname matches, check IP matches
+                match (allow_ip_match, deny_ip_match) {
+                    (true, true) => {
+                        // Both matched by IP, deny wins on tie
+                        return false;
+                    }
+                    (true, false) => return true,
+                    (false, true) => return false,
+                    (false, false) => {
+                        // Neither matched - use policy mode default
+                        // In Allow mode: block by default (return false)
+                        // In Deny mode: allow by default (return true)
+                        return self.mode == crate::config::schema::PolicyMode::Deny;
+                    }
+                }
+            }
         }
-
-        if allow_hostname_spec.is_some() {
-            // Only allow matched by hostname
-            return true;
-        }
-
-        if deny_hostname_spec.is_some() {
-            // Only deny matched by hostname
-            return false;
-        }
-
-        // No hostname matches, check IP matches
-        if allow_ip_match && deny_ip_match {
-            // Both matched by IP, deny wins on tie
-            return false;
-        }
-
-        if allow_ip_match {
-            return true;
-        }
-
-        if deny_ip_match {
-            return false;
-        }
-
-        // Neither matched - use policy mode default
-        // In Allow mode: block by default (return false)
-        // In Deny mode: allow by default (return true)
-        self.mode == crate::config::schema::PolicyMode::Deny
     }
 
     /// Check if this policy allows all traffic
@@ -180,6 +209,7 @@ mod tests {
             HostGroup {
                 description: "Anthropic".to_string(),
                 hosts: vec!["*.anthropic.com".to_string(), "*.claude.ai".to_string()],
+                hosts_deny: vec![],
                 ipv4_ranges: vec![],
                 ipv6_ranges: vec![],
                 groups: vec![],
@@ -191,6 +221,7 @@ mod tests {
             HostGroup {
                 description: "Google".to_string(),
                 hosts: vec!["*.google.com".to_string()],
+                hosts_deny: vec![],
                 ipv4_ranges: vec!["142.250.0.0/15".to_string()],
                 ipv6_ranges: vec![],
                 groups: vec![],
@@ -264,6 +295,7 @@ mod tests {
             HostGroup {
                 description: "Base".to_string(),
                 hosts: vec!["*.base.com".to_string()],
+                hosts_deny: vec![],
                 ipv4_ranges: vec![],
                 ipv6_ranges: vec![],
                 groups: vec![],
@@ -275,6 +307,7 @@ mod tests {
             HostGroup {
                 description: "Extended".to_string(),
                 hosts: vec!["*.extended.com".to_string()],
+                hosts_deny: vec![],
                 ipv4_ranges: vec![],
                 ipv6_ranges: vec![],
                 groups: vec!["base".to_string()],

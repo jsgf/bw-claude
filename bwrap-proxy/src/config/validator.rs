@@ -152,6 +152,7 @@ mod tests {
             HostGroup {
                 description: "A".to_string(),
                 hosts: vec![],
+                hosts_deny: vec![],
                 ipv4_ranges: vec![],
                 ipv6_ranges: vec![],
                 groups: vec!["b".to_string()],
@@ -163,6 +164,7 @@ mod tests {
             HostGroup {
                 description: "B".to_string(),
                 hosts: vec![],
+                hosts_deny: vec![],
                 ipv4_ranges: vec![],
                 ipv6_ranges: vec![],
                 groups: vec![],
@@ -181,6 +183,7 @@ mod tests {
             HostGroup {
                 description: "A".to_string(),
                 hosts: vec![],
+                hosts_deny: vec![],
                 ipv4_ranges: vec![],
                 ipv6_ranges: vec![],
                 groups: vec!["b".to_string()],
@@ -192,6 +195,7 @@ mod tests {
             HostGroup {
                 description: "B".to_string(),
                 hosts: vec![],
+                hosts_deny: vec![],
                 ipv4_ranges: vec![],
                 ipv6_ranges: vec![],
                 groups: vec!["a".to_string()], // Cycle!
@@ -210,6 +214,7 @@ mod tests {
             HostGroup {
                 description: "Test".to_string(),
                 hosts: vec![],
+                hosts_deny: vec![],
                 ipv4_ranges: vec!["192.168.1.0/24".to_string()],
                 ipv6_ranges: vec!["2001:db8::/32".to_string()],
                 groups: vec![],
@@ -228,6 +233,7 @@ mod tests {
             HostGroup {
                 description: "Test".to_string(),
                 hosts: vec![],
+                hosts_deny: vec![],
                 ipv4_ranges: vec!["invalid".to_string()],
                 ipv6_ranges: vec![],
                 groups: vec![],

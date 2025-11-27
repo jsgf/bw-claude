@@ -121,39 +121,58 @@ fn get_claude_path() -> Result<PathBuf> {
 }
 
 /// Determine the network mode based on CLI flags
-/// --policy or --learn enables HTTP CONNECT proxy with filtering
+/// --policy, --learn, or --learn-deny enables HTTP CONNECT proxy with filtering
 async fn determine_network_mode(
     common: &CommonArgs,
     proxy_config: &Option<PathBuf>,
 ) -> Result<(NetworkMode, Option<PathBuf>)> {
+    // Check if lockdown policy is specified (pure network isolation, no proxy)
+    if let Some(ref policy) = common.policy {
+        if policy == "lockdown" {
+            return Ok((NetworkMode::Disabled, None));
+        }
+    }
+
     // Check if proxy should be enabled
-    let use_proxy = common.policy.is_some() || common.learn.is_some();
+    let use_proxy = common.policy.is_some()
+        || common.learn.is_some()
+        || common.learn_deny.is_some();
 
     if use_proxy {
-        // Determine policy name:
-        // - If --learn is specified, use "open" (allow all, but record)
-        // - Otherwise, use --policy if specified, default to "open"
-        let policy_name = if common.learn.is_some() {
-            "open"
+        // Determine policy name and learning mode:
+        // - If --learn is specified: use "open" policy (allow all, record access)
+        // - If --learn-deny is specified: use specified policy or default to "block" (enforce policy, record denials)
+        // - If --policy is specified: use that policy (no learning)
+        let (policy_name, learning_mode, learning_output) = if let Some(_) = common.learn {
+            ("open", Some("learn"), common.learn.as_ref())
+        } else if let Some(_) = common.learn_deny {
+            (
+                common.policy.as_ref().map(|s| s.as_str()).unwrap_or("block"),
+                Some("learn_deny"),
+                common.learn_deny.as_ref(),
+            )
         } else {
-            common.policy.as_ref().map(|s| s.as_str()).unwrap_or("open")
+            (
+                common.policy.as_ref().map(|s| s.as_str()).unwrap_or("open"),
+                None,
+                None,
+            )
         };
 
-        // Learning output: set if --learn is specified
-        let learning_output = common.learn.as_ref();
-
         // Create proxy task with policy and learning configuration
-        let socket_path = create_proxy_task(
+        let (socket_path, _) = create_proxy_task(
             proxy_config,
             Some(policy_name),
             learning_output,
+            learning_mode.map(|s| s.to_string()),
         )
         .await?;
 
         let network_mode = NetworkMode::Filtered {
             proxy_socket: socket_path.clone(),
             policy_name: policy_name.to_string(),
-            learning_output: common.learn.clone(),
+            learning_output: learning_output.cloned(),
+            learning_mode: learning_mode.map(|s| s.to_string()),
             allowed_domains: vec![], // Deprecated field, kept for compatibility
         };
 

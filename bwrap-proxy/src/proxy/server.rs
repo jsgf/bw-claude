@@ -20,6 +20,9 @@ pub struct ProxyServerConfig {
     pub learning_recorder: Option<Arc<LearningRecorder>>,
     /// Optional path to save learning data on shutdown
     pub learning_output: Option<PathBuf>,
+    /// Learning mode type: "learn" (record all access) or "learn_deny" (record denied access)
+    /// None if not in learning mode
+    pub learning_mode: Option<String>,
 }
 
 /// Policy filtering proxy server
@@ -177,6 +180,23 @@ async fn handle_client(
 
         if !allowed {
             debug!("Connection blocked by policy: {}:{}", host, port);
+
+            // Record denied access in --learn-deny mode
+            if let Some(ref learning_recorder) = config.learning_recorder {
+                if let Some(ref mode) = config.learning_mode {
+                    if mode == "learn_deny" {
+                        learning_recorder.record_denied(host, None);
+
+                        // Save denied data immediately after recording
+                        if let Some(ref output_path) = config.learning_output {
+                            if let Err(e) = learning_recorder.save_denied_to_file(output_path) {
+                                debug!("Failed to save denied data: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
             let _ = stream.write_all(b"BLOCKED\n").await;
             return Ok(());
         }
@@ -184,12 +204,27 @@ async fn handle_client(
 
     // Record access in learning mode if enabled
     if let Some(ref learning_recorder) = config.learning_recorder {
-        learning_recorder.record(host, None);
+        // In --learn mode, record all allowed access
+        if let Some(ref mode) = config.learning_mode {
+            if mode == "learn" || mode != "learn_deny" {
+                learning_recorder.record(host, None);
 
-        // Save learning data immediately after recording
-        if let Some(ref output_path) = config.learning_output {
-            if let Err(e) = learning_recorder.save_to_file(output_path) {
-                debug!("Failed to save learning data: {}", e);
+                // Save learning data immediately after recording
+                if let Some(ref output_path) = config.learning_output {
+                    if let Err(e) = learning_recorder.save_to_file(output_path) {
+                        debug!("Failed to save learning data: {}", e);
+                    }
+                }
+            }
+        } else {
+            // If no learning mode specified but recorder exists, record access (backward compatibility)
+            learning_recorder.record(host, None);
+
+            // Save learning data immediately after recording
+            if let Some(ref output_path) = config.learning_output {
+                if let Err(e) = learning_recorder.save_to_file(output_path) {
+                    debug!("Failed to save learning data: {}", e);
+                }
             }
         }
     }
@@ -234,6 +269,7 @@ mod tests {
             policy_engine: None,
             learning_recorder: None,
             learning_output: None,
+            learning_mode: None,
         };
 
         let server = ProxyServer::new(config);

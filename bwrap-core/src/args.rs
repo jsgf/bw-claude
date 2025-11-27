@@ -48,7 +48,7 @@ pub struct CommonArgs {
     pub bw_relay_path: Option<PathBuf>,
 
     /// Network policy to enforce (enables HTTP CONNECT proxy filtering)
-    /// Options: "open", "lockdown", "claude", "gemini", or custom policy name
+    /// Options: "open", "lockdown", "block", "claude", "gemini", or custom policy name
     #[arg(long, value_name = "NAME")]
     pub policy: Option<String>,
 
@@ -57,6 +57,12 @@ pub struct CommonArgs {
     /// (enables HTTP CONNECT proxy filtering in open mode)
     #[arg(long, value_name = "FILE")]
     pub learn: Option<PathBuf>,
+
+    /// Learning-deny mode: enforce policy but record domains that would be denied
+    /// Allows building deny lists of unwanted domains
+    /// Mutually exclusive with --learn
+    #[arg(long, value_name = "FILE", conflicts_with = "learn")]
+    pub learn_deny: Option<PathBuf>,
 
     /// Tool arguments (use -- to separate from bw-* options)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

@@ -15,14 +15,15 @@ use std::time::SystemTime;
 /// 4. Creates a LearningRecorder if learning_output is specified
 /// 5. Spawns the proxy server as a tokio task (runs until parent exits)
 /// 6. Waits for the proxy to be ready (listening on the socket)
-/// 7. Returns the socket path for mounting in the sandbox
+/// 7. Returns the socket path and learning mode (if active)
 ///
 /// Note: The proxy will save learning data on shutdown via a cleanup function
 pub async fn create_proxy_task(
     config_path: &Option<PathBuf>,
     policy_name: Option<&str>,
     learning_output: Option<&PathBuf>,
-) -> Result<PathBuf> {
+    learning_mode: Option<String>,
+) -> Result<(PathBuf, Option<String>)> {
     // Generate a unique socket path in /tmp
     let session_id = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -64,6 +65,7 @@ pub async fn create_proxy_task(
         policy_engine,
         learning_recorder: learning_recorder.clone(),
         learning_output: learning_output.cloned(),
+        learning_mode: learning_mode.clone(),
     };
 
     let proxy = ProxyServer::new(proxy_config);
@@ -84,5 +86,5 @@ pub async fn create_proxy_task(
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
     }
 
-    Ok(socket_path)
+    Ok((socket_path, learning_mode))
 }

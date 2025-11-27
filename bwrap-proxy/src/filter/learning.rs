@@ -8,11 +8,15 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Records accessed hosts and IPs during learning mode
+/// Can track both allowed access (--learn) and denied access (--learn-deny)
 #[derive(Clone)]
 pub struct LearningRecorder {
+    // Allowed access recording
     hosts: Arc<Mutex<HashSet<String>>>,
     ipv4_ranges: Arc<Mutex<HashSet<String>>>,
     ipv6_ranges: Arc<Mutex<HashSet<String>>>,
+    // Denied access recording (for --learn-deny mode)
+    denied_hosts: Arc<Mutex<HashSet<String>>>,
     session_name: String,
 }
 
@@ -26,6 +30,7 @@ impl LearningRecorder {
             hosts: Arc::new(Mutex::new(HashSet::new())),
             ipv4_ranges: Arc::new(Mutex::new(HashSet::new())),
             ipv6_ranges: Arc::new(Mutex::new(HashSet::new())),
+            denied_hosts: Arc::new(Mutex::new(HashSet::new())),
             session_name,
         }
     }
@@ -36,6 +41,7 @@ impl LearningRecorder {
             hosts: Arc::new(Mutex::new(HashSet::new())),
             ipv4_ranges: Arc::new(Mutex::new(HashSet::new())),
             ipv6_ranges: Arc::new(Mutex::new(HashSet::new())),
+            denied_hosts: Arc::new(Mutex::new(HashSet::new())),
             session_name: name.into(),
         }
     }
@@ -70,6 +76,20 @@ impl LearningRecorder {
         if let Some(addr) = ip {
             self.record_ip(addr);
         }
+    }
+
+    /// Record a denied host access (for --learn-deny mode)
+    pub fn record_denied_host(&self, host: &str) {
+        if let Ok(mut hosts) = self.denied_hosts.lock() {
+            hosts.insert(host.to_string());
+        }
+    }
+
+    /// Record a denied connection (for --learn-deny mode)
+    pub fn record_denied(&self, host: &str, _ip: Option<IpAddr>) {
+        // For now, we only record the hostname for denials
+        // IP addresses in denials are less useful since the policy determines access
+        self.record_denied_host(host);
     }
 
     /// Load existing domains from a TOML file and return them as a set
@@ -143,8 +163,25 @@ impl LearningRecorder {
         HostGroup {
             description: self.session_name.clone(),
             hosts,
+            hosts_deny: Vec::new(),
             ipv4_ranges,
             ipv6_ranges,
+            groups: Vec::new(),
+        }
+    }
+
+    /// Get denied hosts as a HostGroup (for --learn-deny mode)
+    pub fn to_denied_host_group(&self) -> HostGroup {
+        let denied_hosts = self.denied_hosts.lock()
+            .map(|h| h.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        HostGroup {
+            description: format!("{}_denied", self.session_name),
+            hosts: denied_hosts,
+            hosts_deny: Vec::new(),
+            ipv4_ranges: Vec::new(),
+            ipv6_ranges: Vec::new(),
             groups: Vec::new(),
         }
     }
@@ -189,6 +226,48 @@ impl LearningRecorder {
             format_toml_array("hosts", &host_group.hosts),
             format_toml_array("ipv4_ranges", &host_group.ipv4_ranges),
             format_toml_array("ipv6_ranges", &host_group.ipv6_ranges),
+        );
+
+        // Append the new group
+        config_content.push_str(&group_section);
+
+        // Write back to file
+        fs::write(path, config_content).map_err(ProxyError::from)?;
+
+        Ok(())
+    }
+
+    /// Save denied hosts to a TOML file (for --learn-deny mode)
+    /// Saves denied hosts to a group that can be used to create deny policies
+    pub fn save_denied_to_file(&self, path: &Path) -> Result<()> {
+        let mut host_group = self.to_denied_host_group();
+
+        // Load existing domains from the file and filter them out
+        if path.exists() {
+            let existing = Self::load_existing_domains(path)?;
+
+            // Remove any entries that already exist
+            host_group.hosts.retain(|h| !existing.contains(h));
+        }
+
+        // Check if we have any NEW denied data to save after deduplication
+        if host_group.hosts.is_empty() {
+            return Ok(()); // Nothing new to save
+        }
+
+        // Read existing config or create minimal structure
+        let mut config_content = if path.exists() {
+            fs::read_to_string(path).map_err(ProxyError::from)?
+        } else {
+            // Create minimal config structure
+            String::from("[common]\nlog_level = \"info\"\n\n[network]\n\n")
+        };
+
+        // Generate the new group section (with only new denied entries)
+        let group_section = format!(
+            "[network.groups.{}]\n{}\n",
+            host_group.description,
+            format_toml_array("hosts", &host_group.hosts),
         );
 
         // Append the new group

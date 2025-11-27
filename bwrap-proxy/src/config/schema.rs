@@ -87,8 +87,12 @@ pub struct NetworkConfig {
 pub struct HostGroup {
     #[serde(default)]
     pub description: String,
+    /// Hosts to allow/include
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Hosts to explicitly deny (override allow rules)
+    #[serde(default)]
+    pub hosts_deny: Vec<String>,
     #[serde(default)]
     pub ipv4_ranges: Vec<String>,
     #[serde(default)]

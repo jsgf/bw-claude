@@ -38,7 +38,7 @@ pub const ESSENTIAL_ETC_FILES: &[&str] = &[
 ];
 
 /// Essential /etc directories to mount from /etc
-pub const ESSENTIAL_ETC_DIRS: &[&str] = &["pki", "ssl", "crypto-policies", "terminfo"];
+pub const ESSENTIAL_ETC_DIRS: &[&str] = &["pki", "ssl", "crypto-policies", "terminfo", "alternatives"];
 
 /// Complete sandbox configuration
 #[derive(Debug, Clone)]
@@ -122,6 +122,10 @@ pub enum NetworkMode {
 
         /// Optional path for learning mode output (records accessed domains)
         learning_output: Option<PathBuf>,
+
+        /// Learning mode type: "learn" (allow all, record access) or "learn_deny" (enforce policy, record denials)
+        /// None if not in learning mode
+        learning_mode: Option<String>,
 
         /// Kept for backward compatibility (derived from policy)
         #[deprecated(note = "Use policy_name instead")]

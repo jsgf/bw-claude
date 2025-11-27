@@ -8,6 +8,7 @@ use wildmatch::WildMatch;
 #[derive(Debug, Clone)]
 pub struct HostMatcher {
     patterns: Vec<WildMatch>,
+    deny_patterns: Vec<WildMatch>,
     ipv4_ranges: Vec<Ipv4Net>,
     ipv6_ranges: Vec<Ipv6Net>,
 }
@@ -17,14 +18,20 @@ impl HostMatcher {
     pub fn new() -> Self {
         Self {
             patterns: Vec::new(),
+            deny_patterns: Vec::new(),
             ipv4_ranges: Vec::new(),
             ipv6_ranges: Vec::new(),
         }
     }
 
-    /// Add a wildcard pattern for host matching
+    /// Add a wildcard pattern for host matching (allow)
     pub fn add_pattern(&mut self, pattern: &str) {
         self.patterns.push(WildMatch::new(pattern));
+    }
+
+    /// Add a wildcard pattern for denying hosts
+    pub fn add_deny_pattern(&mut self, pattern: &str) {
+        self.deny_patterns.push(WildMatch::new(pattern));
     }
 
     /// Add an IPv4 CIDR range
@@ -83,6 +90,31 @@ impl HostMatcher {
         }
 
         max_specificity
+    }
+
+    /// Check both allow and deny patterns with specificity
+    /// Returns (allow_specificity, deny_specificity)
+    pub fn matches_with_deny_specificity(&self, host: &str) -> (Option<usize>, Option<usize>) {
+        let mut allow_specificity = None;
+        let mut deny_specificity = None;
+
+        // Check allow patterns
+        for pattern in &self.patterns {
+            if pattern.matches(host) {
+                let spec = calculate_hostname_specificity(host);
+                allow_specificity = Some(allow_specificity.unwrap_or(0).max(spec));
+            }
+        }
+
+        // Check deny patterns
+        for pattern in &self.deny_patterns {
+            if pattern.matches(host) {
+                let spec = calculate_hostname_specificity(host);
+                deny_specificity = Some(deny_specificity.unwrap_or(0).max(spec));
+            }
+        }
+
+        (allow_specificity, deny_specificity)
     }
 }
 
