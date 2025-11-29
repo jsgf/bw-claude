@@ -3,3 +3,4 @@
 - NEVER add "🤖 Generated with [Claude Code](https://claude.com/claude-code)" or "Co-Authored-By: Claude <noreply@anthropic.com>" to commits.
 - *DO* *NOT* *USE* *GIT* ***EVER***. THIS IS NOT A GIT PROJECT!!!! Actually don't touch jj either.
 - ALWAYS put `use` statements at the top of the file in the appropriate place, except for inlined test modules.
+- Never use unqualified `Result` unless its `std::result::Result`

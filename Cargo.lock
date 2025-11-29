@@ -148,10 +148,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bwrap-proxy",
+ "chrono",
  "clap",
+ "indexmap",
+ "serde",
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
 ]
 

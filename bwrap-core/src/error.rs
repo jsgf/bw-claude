@@ -30,4 +30,16 @@ pub enum SandboxError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Failed to load config from {path}: {source}")]
+    ConfigLoad {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
+    #[error("Invalid TOML: {0}")]
+    TomlError(#[from] toml::de::Error),
 }

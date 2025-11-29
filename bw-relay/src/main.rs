@@ -12,22 +12,32 @@ struct Args {
     #[arg(long, default_value = "3128")]
     http_port: u16,
 
-    /// Unix domain socket path to connect to
+    /// Unix domain socket path to connect to (optional - if not provided, just executes target command)
     #[arg(long)]
-    socket: PathBuf,
+    socket: Option<PathBuf>,
 
     /// Enable debug logging
     #[arg(long, short = 'v')]
     verbose: bool,
-
-    /// Target command and arguments (use -- to separate from bw-relay options)
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    target_command: Vec<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    // Split arguments at `--` separator to separate bw-relay options from target command
+    let args_vec: Vec<String> = std::env::args().collect();
+    let separator_idx = args_vec.iter().position(|arg| arg == "--");
+
+    let (relay_args, target_command) = if let Some(idx) = separator_idx {
+        // Split at `--`: everything before goes to clap, everything after is target_command
+        (args_vec[..=idx].to_vec(), args_vec[idx + 1..].to_vec())
+    } else {
+        // No `--` separator found - check if there are extra arguments
+        // If the last arg looks like it might be a target command, require `--`
+        (args_vec.clone(), vec![])
+    };
+
+    // Parse bw-relay's own arguments
+    let args = Args::try_parse_from(&relay_args)?;
 
     // Initialize logging - only if BW_LOG env var or verbose flag
     let _ = if args.verbose || std::env::var("BW_LOG").is_ok() {
@@ -43,39 +53,53 @@ async fn main() -> anyhow::Result<()> {
             .try_init()
     };
 
-    tracing::info!(
-        "Starting bw-relay: HTTP on :{}, UDS at {:?}",
-        args.http_port,
-        args.socket
-    );
+    // Handle proxy mode (when socket is provided)
+    if let Some(ref socket_path) = args.socket {
+        tracing::info!(
+            "Starting bw-relay: HTTP on :{}, UDS at {:?}",
+            args.http_port,
+            socket_path
+        );
 
-    // Spawn HTTP server
-    let uds_path_http = args.socket.clone();
-    let http_handle = tokio::spawn(async move {
-        run_http_server("127.0.0.1", args.http_port, &uds_path_http).await
-    });
+        // Spawn HTTP server for proxy mode
+        let uds_path_http = socket_path.clone();
+        let http_handle = tokio::spawn(async move {
+            run_http_server("127.0.0.1", args.http_port, &uds_path_http).await
+        });
 
-    // If a target command is provided, execute it after a brief delay to allow servers to start
-    if !args.target_command.is_empty() {
-        // Wait a bit for servers to bind and start listening
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // If a target command is provided, execute it after a brief delay to allow servers to start
+        if !target_command.is_empty() {
+            // Wait a bit for servers to bind and start listening
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        tracing::info!("Executing target command: {:?}", args.target_command);
+            tracing::info!("Executing target command: {:?}", target_command);
 
-        // Set up proxy environment variables
-        let http_proxy = format!("http://127.0.0.1:{}", args.http_port);
+            // Set up proxy environment variables
+            let http_proxy = format!("http://127.0.0.1:{}", args.http_port);
 
-        // Execute the target command with proxy env vars
-        let status = execute_command(&args.target_command, &http_proxy)?;
+            // Execute the target command with proxy env vars
+            let status = execute_command(&target_command, &http_proxy)?;
 
-        // Drop the handle to stop the server
-        http_handle.abort();
+            // Drop the handle to stop the server
+            http_handle.abort();
 
-        std::process::exit(status.code().unwrap_or(1));
+            std::process::exit(status.code().unwrap_or(1));
+        }
+
+        // If no target command, wait for the server to run forever
+        http_handle.await??;
+    } else {
+        // Non-proxy mode: just execute the target command if provided
+        if !target_command.is_empty() {
+            tracing::info!("Executing target command (non-proxy mode): {:?}", target_command);
+
+            // Execute the target command without proxy env vars
+            let status = execute_command(&target_command, "")?;
+            std::process::exit(status.code().unwrap_or(1));
+        } else {
+            anyhow::bail!("No target command provided and no socket for proxy mode");
+        }
     }
-
-    // If no target command, wait for the server to run forever
-    http_handle.await??;
 
     Ok(())
 }

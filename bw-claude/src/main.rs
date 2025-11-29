@@ -1,7 +1,7 @@
 //! Bubblewrap sandboxing wrapper for Claude CLI
 
 use anyhow::{Context, Result};
-use bwrap_core::{CommonArgs, create_proxy_task, HomeAccessMode, NetworkMode, SandboxBuilder, SandboxConfig, ToolConfig};
+use bwrap_core::{CommonArgs, ConfigLoader, HomeAccessMode, SandboxBuilder, SandboxConfig, ToolConfig, setup_policy};
 use clap::Parser;
 use std::collections::HashMap;
 use std::env;
@@ -42,13 +42,13 @@ async fn main() -> Result<()> {
 
     // Handle --list-policies and --list-groups flags
     if args.common.list_policies || args.common.list_groups {
-        let config = bwrap_proxy::ConfigLoader::load_or_default(args.common.proxy_config.clone())
+        let config = ConfigLoader::load_or_default(args.common.proxy_config.clone())
             .context("Failed to load proxy configuration")?;
 
         if args.common.list_policies {
-            println!("Available network policies:\n");
-            for (name, policy) in &config.network.policies {
-                println!("  {} - {}", name, policy.description);
+            println!("Available policies:\n");
+            for (name, policy) in &config.policy.policies {
+                println!("  {} - {}", name, policy.description.as_deref().unwrap_or("(no description)"));
             }
             println!();
         }
@@ -67,15 +67,16 @@ async fn main() -> Result<()> {
     // Get Claude CLI path
     let claude_path = get_claude_path()?;
 
-    // Handle network mode and proxy first (while args.common is still intact)
-    // --proxy or --policy implies --no-network (disables direct network, forces proxy-only)
-    let (network_mode, _proxy_socket) = determine_network_mode(
-        &args.common,
-        &args.common.proxy_config,
-    )
-    .await?;
+    // Load configuration
+    let app_config = ConfigLoader::load_or_default(args.common.proxy_config.clone())
+        .context("Failed to load application configuration")?;
 
-    // Determine target directory (use reference to avoid moving)
+    // Set up policy with tool-specific default
+    let policy_setup = setup_policy(&app_config, &args.common, "claude")
+        .await
+        .context("Failed to set up policy")?;
+
+    // Determine target directory
     let target_dir = if let Some(dir) = args.common.dir.as_ref() {
         dir.canonicalize()
             .context("Failed to canonicalize target directory")?
@@ -83,11 +84,10 @@ async fn main() -> Result<()> {
         env::current_dir().context("Failed to get current directory")?
     };
 
-    // Build tool configuration (now we can move cli_args)
+    // Build tool configuration
     let tool_config = ToolConfig {
         name: "claude".to_string(),
         cli_path: claude_path,
-        home_dot_file: Some(".claude.json".to_string()),
         default_args: if !args.no_skip_permissions {
             vec!["--dangerously-skip-permissions".to_string()]
         } else {
@@ -99,12 +99,12 @@ async fn main() -> Result<()> {
     };
 
     // Build sandbox configuration
-    // Note: bw-relay sets proxy env vars, so we don't set them here
     let config = SandboxConfig {
         tool_name: "claude".to_string(),
+        policy_name: policy_setup.policy_name,
         tool_config,
         target_dir,
-        network_mode,
+        network_mode: policy_setup.network_mode,
         home_access: if args.common.full_home_access {
             HomeAccessMode::Full
         } else {
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
     };
 
     // Build and execute sandbox
-    let sandbox = SandboxBuilder::new(config)
+    let sandbox = SandboxBuilder::new(config, policy_setup.filesystem_spec)
         .context("Failed to create sandbox builder")?
         .build()
         .context("Failed to build sandbox")?;
@@ -142,68 +142,4 @@ fn get_claude_path() -> Result<PathBuf> {
     }
 
     Ok(path)
-}
-
-/// Determine the network mode based on CLI flags
-/// --policy, --learn, or --learn-deny enables HTTP CONNECT proxy with filtering
-async fn determine_network_mode(
-    common: &CommonArgs,
-    proxy_config: &Option<PathBuf>,
-) -> Result<(NetworkMode, Option<PathBuf>)> {
-    // Check if lockdown policy is specified (pure network isolation, no proxy)
-    if let Some(ref policy) = common.policy {
-        if policy == "lockdown" {
-            return Ok((NetworkMode::Disabled, None));
-        }
-    }
-
-    // Check if proxy should be enabled
-    let use_proxy = common.policy.is_some()
-        || common.learn.is_some()
-        || common.learn_deny.is_some();
-
-    if use_proxy {
-        // Determine policy name and learning mode:
-        // - If --learn is specified: use "open" policy (allow all, record access)
-        // - If --learn-deny is specified: use specified policy or default to "block" (enforce policy, record denials)
-        // - If --policy is specified: use that policy (no learning)
-        let (policy_name, learning_mode, learning_output) = if let Some(_) = common.learn {
-            ("open", Some("learn"), common.learn.as_ref())
-        } else if let Some(_) = common.learn_deny {
-            (
-                common.policy.as_ref().map(|s| s.as_str()).unwrap_or("block"),
-                Some("learn_deny"),
-                common.learn_deny.as_ref(),
-            )
-        } else {
-            (
-                common.policy.as_ref().map(|s| s.as_str()).unwrap_or("open"),
-                None,
-                None,
-            )
-        };
-
-        // Create proxy task with policy and learning configuration
-        let (socket_path, _) = create_proxy_task(
-            proxy_config,
-            Some(policy_name),
-            learning_output,
-            learning_mode.map(|s| s.to_string()),
-        )
-        .await?;
-
-        let network_mode = NetworkMode::Filtered {
-            proxy_socket: socket_path.clone(),
-            policy_name: policy_name.to_string(),
-            learning_output: learning_output.cloned(),
-            learning_mode: learning_mode.map(|s| s.to_string()),
-            allowed_domains: vec![], // Deprecated field, kept for compatibility
-        };
-
-        Ok((network_mode, Some(socket_path)))
-    } else if common.no_network {
-        Ok((NetworkMode::Disabled, None))
-    } else {
-        Ok((NetworkMode::Enabled, None))
-    }
 }

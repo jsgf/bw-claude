@@ -3,48 +3,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Directories safe to mount from home when using safe mode (default)
-/// NOTE: Documents and Downloads are NOT included as they often contain sensitive files
-pub const SAFE_HOME_DIRS: &[&str] = &[
-    ".local/share",
-    ".local/bin",
-    "Projects",
-    ".cargo",
-    ".rustup",
-    ".npm",
-    ".gem",
-    ".gradle",
-    ".m2",
-    ".nvm",
-    ".go",
-    ".gitconfig",
-];
-
-/// Safe subdirectories within ~/.config/ to mount (excludes browsers and sensitive data)
-pub const SAFE_CONFIG_DIRS: &[&str] = &[
-    "git", "nvim", "vim", "htop", "nano", "less", "lsd", "bat", "zsh", "bash", "fish",
-    "alacritty", "kitty",
-];
-
-/// Essential /etc files to mount (minimal /etc)
-pub const ESSENTIAL_ETC_FILES: &[&str] = &[
-    "hostname",
-    "hosts",
-    "resolv.conf",
-    "passwd",
-    "group",
-    "timezone",
-    "localtime",
-];
-
-/// Essential /etc directories to mount from /etc
-pub const ESSENTIAL_ETC_DIRS: &[&str] = &["pki", "ssl", "crypto-policies", "terminfo", "alternatives"];
-
 /// Complete sandbox configuration
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     /// Name of the tool being sandboxed (e.g., "claude", "gemini")
     pub tool_name: String,
+
+    /// Name of the policy being enforced (e.g., "claude", "gemini", "lockdown")
+    /// Indicates which policy is in effect for this sandbox
+    pub policy_name: String,
 
     /// Tool-specific configuration
     pub tool_config: ToolConfig,
@@ -80,6 +47,13 @@ pub struct SandboxConfig {
     pub bw_relay_path: Option<PathBuf>,
 }
 
+impl SandboxConfig {
+    /// Get the name of the policy being used
+    pub fn policy_name(&self) -> &str {
+        &self.policy_name
+    }
+}
+
 /// Tool-specific configuration
 #[derive(Debug, Clone)]
 pub struct ToolConfig {
@@ -88,9 +62,6 @@ pub struct ToolConfig {
 
     /// Path to the tool's CLI executable
     pub cli_path: PathBuf,
-
-    /// Optional dot file in home directory (e.g., ".claude.json")
-    pub home_dot_file: Option<String>,
 
     /// Default arguments to pass to the tool
     pub default_args: Vec<String>,

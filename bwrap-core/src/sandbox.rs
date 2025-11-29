@@ -1,8 +1,7 @@
 //! Sandbox builder and execution
 
 use crate::config::{
-    HomeAccessMode, NetworkMode, ESSENTIAL_ETC_DIRS, ESSENTIAL_ETC_FILES, SAFE_CONFIG_DIRS,
-    SAFE_HOME_DIRS, SandboxConfig,
+    HomeAccessMode, NetworkMode, SandboxConfig, FilesystemSpec,
 };
 use crate::env::EnvironmentBuilder;
 use crate::error::{Result, SandboxError};
@@ -33,11 +32,12 @@ pub struct SandboxBuilder {
     mounts: Vec<MountPoint>,
     env_builder: EnvironmentBuilder,
     tmp_export_dir: Option<PathBuf>,
+    filesystem_spec: FilesystemSpec,
 }
 
 impl SandboxBuilder {
-    /// Create a new sandbox builder
-    pub fn new(config: SandboxConfig) -> Result<Self> {
+    /// Create a new sandbox builder with a filesystem spec
+    pub fn new(config: SandboxConfig, filesystem_spec: FilesystemSpec) -> Result<Self> {
         // Validate configuration
         if !config.shell && !config.tool_config.cli_path.exists() {
             return Err(SandboxError::CliNotFound(
@@ -54,6 +54,7 @@ impl SandboxBuilder {
             mounts: Vec::new(),
             env_builder: EnvironmentBuilder::new(),
             tmp_export_dir: None,
+            filesystem_spec,
         })
     }
 
@@ -108,10 +109,14 @@ impl SandboxBuilder {
                 self.mounts.push(MountPoint::rw(&home_path, &home_path));
             }
             HomeAccessMode::Safe => {
-                self.mount_safe_home_dirs(&home_path)?;
-                self.mount_safe_config_dirs(&home_path)?;
+                self.mount_ro_home_dirs(&home_path)?;
+                self.mount_rw_home_dirs(&home_path)?;
+                self.mount_home_files(&home_path)?;
             }
         }
+
+        // Mount additional paths from config (both modes can use this)
+        self.mount_config_paths()?;
 
         // System binaries and libraries (read-only)
         for path in ["/usr", "/lib", "/lib64"] {
@@ -124,31 +129,19 @@ impl SandboxBuilder {
         self.mounts
             .push(MountPoint::symlink("/usr/bin", "/bin"));
 
-        // Tool-specific state directories
-        let global_tool_dir = home_path.join(format!(".{}", self.config.tool_name));
-        if global_tool_dir.exists() {
-            self.mounts
-                .push(MountPoint::rw(&global_tool_dir, &global_tool_dir));
-        }
-
-        // Tool-specific dot file in home
-        if let Some(ref dot_file) = self.config.tool_config.home_dot_file {
-            let dot_file_path = home_path.join(dot_file);
-            if !dot_file_path.exists() {
-                // Create empty file so bind mount works
-                fs::File::create(&dot_file_path)?;
-            }
-            self.mounts
-                .push(MountPoint::rw(&dot_file_path, &dot_file_path));
-        }
+        // Note: Tool-specific state directories and dot files should be configured
+        // via the filesystem config (safe_home_dirs), not hardcoded here
 
         // Project directory (read-write by default)
         self.mounts
             .push(MountPoint::rw(&self.config.target_dir, &self.config.target_dir));
 
-        // Process and device access
-        self.mounts.push(MountPoint::ro("/proc", "/proc")); // Use --proc instead
-        self.mounts.push(MountPoint::rw("/dev", "/dev")); // Use --dev-bind instead
+        // Mount bw-relay binary for command execution
+        self.mount_bw_relay()?;
+
+        // Process and device access (handled with special modes)
+        self.mounts.push(MountPoint::proc());
+        self.mounts.push(MountPoint::dev_bind());
 
         // Additional mount paths (support relative paths)
         for path in &self.config.additional_ro_paths {
@@ -177,49 +170,10 @@ impl SandboxBuilder {
             }
         }
 
-        // Handle Filtered network mode setup
+        // Mount proxy socket if in Filtered network mode
         if let NetworkMode::Filtered { proxy_socket, .. } = &self.config.network_mode {
-            // Mount proxy socket for relay to connect to
             self.mounts
                 .push(MountPoint::rw(proxy_socket, &PathBuf::from("/proxy.sock")));
-
-            // Determine bw-relay path (REQUIRED for filtered proxy mode)
-            let relay_path = if let Some(explicit_path) = &self.config.bw_relay_path {
-                // Explicit path provided - must exist
-                if !explicit_path.exists() {
-                    return Err(SandboxError::CliNotFound(explicit_path.clone()))?;
-                }
-                explicit_path.clone()
-            } else {
-                // Try to find bw-relay in common locations
-                let mut candidates = Vec::new();
-
-                // 1. Same directory as current executable
-                if let Ok(exe_path) = std::env::current_exe() {
-                    if let Some(parent) = exe_path.parent() {
-                        candidates.push(parent.join("bw-relay"));
-                    }
-                }
-
-                // 2. Search in PATH
-                if let Ok(path_env) = std::env::var("PATH") {
-                    for path_dir in path_env.split(':') {
-                        candidates.push(PathBuf::from(path_dir).join("bw-relay"));
-                    }
-                }
-
-                // Find first existing candidate
-                let default = candidates
-                    .into_iter()
-                    .find(|p| p.exists())
-                    .ok_or_else(|| SandboxError::CliNotFound(PathBuf::from("bw-relay")))?;
-
-                default
-            };
-
-            tracing::debug!("Mounting bw-relay from: {:?}", relay_path);
-            self.mounts
-                .push(MountPoint::ro(&relay_path, &PathBuf::from("/bw-relay")));
         }
 
         Ok(())
@@ -229,29 +183,29 @@ impl SandboxBuilder {
         // Create empty /etc
         self.mounts.push(MountPoint::tmpfs("/etc"));
 
-        // Mount individual essential files
-        for filename in ESSENTIAL_ETC_FILES {
-            let filepath = PathBuf::from("/etc").join(filename);
-            self.mounts.push(MountPoint::ro_try(&filepath, &filepath));
+        // Collect paths first to avoid borrowing issues
+        let files_to_mount: Vec<PathBuf> = self
+            .filesystem_spec
+            .essential_etc_files
+            .iter()
+            .map(|f| PathBuf::from("/etc").join(f))
+            .collect();
+
+        let dirs_to_mount: Vec<PathBuf> = self
+            .filesystem_spec
+            .essential_etc_dirs
+            .iter()
+            .map(|d| PathBuf::from("/etc").join(d))
+            .collect();
+
+        // Mount individual essential files (resolve symlinks if needed)
+        for filepath in files_to_mount {
+            self.mount_with_symlink_resolution(&filepath)?;
         }
 
-        // Mount essential directories
-        for dirname in ESSENTIAL_ETC_DIRS {
-            let dirpath = PathBuf::from("/etc").join(dirname);
-            self.mounts.push(MountPoint::ro_try(&dirpath, &dirpath));
-        }
-
-        // Special handling for /etc/resolv.conf if it's a symlink
-        let resolv_conf = Path::new("/etc/resolv.conf");
-        if resolv_conf.exists() && resolv_conf.is_symlink() {
-            let real_resolv = resolv_conf
-                .canonicalize()
-                .map_err(|e| SandboxError::SymlinkResolution {
-                    path: resolv_conf.to_path_buf(),
-                    source: e,
-                })?;
-            self.mounts
-                .push(MountPoint::ro_try(&real_resolv, &PathBuf::from("/etc/resolv.conf")));
+        // Mount essential directories (resolve symlinks if needed)
+        for dirpath in dirs_to_mount {
+            self.mount_with_symlink_resolution(&dirpath)?;
         }
 
         // Remount /etc as read-only to prevent processes from creating new files
@@ -260,8 +214,70 @@ impl SandboxBuilder {
         Ok(())
     }
 
-    fn mount_safe_home_dirs(&mut self, home: &Path) -> Result<()> {
-        for dir_name in SAFE_HOME_DIRS {
+    /// Mount a path, following symlinks if necessary
+    fn mount_with_symlink_resolution(&mut self, path: &Path) -> Result<()> {
+        if path.exists() {
+            if path.is_symlink() {
+                // Resolve symlink and mount the real path
+                let real_path = path.canonicalize().map_err(|e| {
+                    SandboxError::SymlinkResolution {
+                        path: path.to_path_buf(),
+                        source: e,
+                    }
+                })?;
+                self.mounts.push(MountPoint::ro_try(&real_path, &path.to_path_buf()));
+            } else {
+                // Regular file/directory, mount as-is
+                self.mounts.push(MountPoint::ro_try(path, path));
+            }
+        }
+        Ok(())
+    }
+
+    /// Mount bw-relay binary for command execution
+    fn mount_bw_relay(&mut self) -> Result<()> {
+        let relay_path = if let Some(explicit_path) = &self.config.bw_relay_path {
+            // Explicit path provided - must exist
+            if !explicit_path.exists() {
+                return Err(SandboxError::CliNotFound(explicit_path.clone()))?;
+            }
+            explicit_path.clone()
+        } else {
+            // Try to find bw-relay in common locations
+            let mut candidates = Vec::new();
+
+            // 1. Same directory as current executable
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Some(parent) = exe_path.parent() {
+                    candidates.push(parent.join("bw-relay"));
+                }
+            }
+
+            // 2. Search in PATH
+            if let Ok(path_env) = std::env::var("PATH") {
+                for path_dir in path_env.split(':') {
+                    candidates.push(PathBuf::from(path_dir).join("bw-relay"));
+                }
+            }
+
+            // Find first existing candidate
+            let default = candidates
+                .into_iter()
+                .find(|p| p.exists())
+                .ok_or_else(|| SandboxError::CliNotFound(PathBuf::from("bw-relay")))?;
+
+            default
+        };
+
+        tracing::debug!("Mounting bw-relay from: {:?}", relay_path);
+        self.mounts
+            .push(MountPoint::ro(&relay_path, &PathBuf::from("/bw-relay")));
+
+        Ok(())
+    }
+
+    fn mount_ro_home_dirs(&mut self, home: &Path) -> Result<()> {
+        for dir_name in &self.filesystem_spec.ro_home_dirs {
             let dir_path = home.join(dir_name);
             if dir_path.exists() {
                 // Use ro_try to skip if mount fails (e.g., permission issues)
@@ -271,13 +287,50 @@ impl SandboxBuilder {
         Ok(())
     }
 
-    fn mount_safe_config_dirs(&mut self, home: &Path) -> Result<()> {
-        let config_dir = home.join(".config");
-        for subdir in SAFE_CONFIG_DIRS {
-            let subdir_path = config_dir.join(subdir);
-            if subdir_path.exists() {
-                // Use ro_try to skip if mount fails (e.g., permission issues)
-                self.mounts.push(MountPoint::ro_try(&subdir_path, &subdir_path));
+    fn mount_rw_home_dirs(&mut self, home: &Path) -> Result<()> {
+        for dir_name in &self.filesystem_spec.rw_home_dirs {
+            let dir_path = home.join(dir_name);
+            if dir_path.exists() {
+                // Use rw mount for read-write home directories
+                self.mounts.push(MountPoint::rw(&dir_path, &dir_path));
+            }
+        }
+        Ok(())
+    }
+
+    fn mount_home_files(&mut self, home: &Path) -> Result<()> {
+        // Mount read-only files in home directory
+        for file_name in &self.filesystem_spec.ro_home_files {
+            let file_path = home.join(file_name);
+            if file_path.exists() {
+                self.mounts.push(MountPoint::ro_try(&file_path, &file_path));
+            }
+        }
+
+        // Mount read-write files in home directory
+        for file_name in &self.filesystem_spec.rw_home_files {
+            let file_path = home.join(file_name);
+            if file_path.exists() {
+                self.mounts.push(MountPoint::rw(&file_path, &file_path));
+            }
+        }
+        Ok(())
+    }
+
+    fn mount_config_paths(&mut self) -> Result<()> {
+        // Mount read-only paths from config
+        for path_str in &self.filesystem_spec.ro_paths {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                self.mounts.push(MountPoint::ro_try(&path, &path));
+            }
+        }
+
+        // Mount read-write paths from config
+        for path_str in &self.filesystem_spec.rw_paths {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                self.mounts.push(MountPoint::rw(&path, &path));
             }
         }
         Ok(())
@@ -316,33 +369,16 @@ impl SandboxBuilder {
 
         // Network namespace
         match self.config.network_mode {
-            NetworkMode::Enabled => {
-                cmd.arg("--share-net");
-            }
-            NetworkMode::Disabled => {
-                cmd.arg("--unshare-net");
-            }
-            NetworkMode::Filtered { .. } => {
-                // Proxy mode disables direct network access, all traffic goes through proxy
-                cmd.arg("--unshare-net");
-            }
-        }
+            NetworkMode::Enabled => 
+                cmd.arg("--share-net"),
+            NetworkMode::Disabled | NetworkMode::Filtered { .. } => 
+                cmd.arg("--unshare-net"),
+        };
 
         // Add all mounts
         for mount in &self.mounts {
-            // Skip --proc and --dev-bind, handle them specially
-            if mount.target == Path::new("/proc") {
-                continue;
-            }
-            if mount.target == Path::new("/dev") {
-                continue;
-            }
             cmd.args(mount.to_args());
         }
-
-        // Special handling for /proc and /dev
-        cmd.arg("--proc").arg("/proc");
-        cmd.arg("--dev-bind").arg("/dev").arg("/dev");
 
         // Set working directory
         cmd.arg("--chdir")
@@ -352,39 +388,32 @@ impl SandboxBuilder {
         cmd.arg("--clearenv");
         cmd.args(self.env_builder.to_args());
 
-        // Shell or CLI command
-        // Proxy relay must always be used when proxy is enabled
-        if let NetworkMode::Filtered { .. } = &self.config.network_mode {
-            // In Filtered mode, execute bw-relay with the target command
-            let (target_binary, target_args) = if self.config.shell {
-                // Pass shell as the target command to bw-relay
-                (PathBuf::from("/bin/sh"), vec!["-i".to_string()])
-            } else {
-                // Pass the CLI tool with its arguments
-                (
-                    self.config.tool_config.cli_path.clone(),
-                    {
-                        let mut args = self.config.tool_config.default_args.clone();
-                        args.extend(self.config.tool_config.cli_args.clone());
-                        args
-                    },
-                )
-            };
-            // bw-relay runs inside the container, so use the in-container socket path
-            let relay_args = crate::startup_script::build_relay_command(
-                &PathBuf::from("/proxy.sock"),
-                &PathBuf::from("/bw-relay"),
-                &target_binary,
-                &target_args,
-            );
-            cmd.args(relay_args);
-        } else if self.config.shell {
-            cmd.arg("/bin/sh").arg("-i");
+        // Always use bw-relay to execute the target command
+        let (target_binary, target_args) = if self.config.shell {
+            // Pass shell as the target command to bw-relay
+            // Include any CLI arguments passed through
+            let mut shell_args = vec!["-i".to_string()];
+            shell_args.extend(self.config.tool_config.cli_args.clone());
+            (PathBuf::from("/bin/sh"), shell_args)
         } else {
-            cmd.arg(&self.config.tool_config.cli_path);
-            cmd.args(&self.config.tool_config.default_args);
-            cmd.args(&self.config.tool_config.cli_args);
+            // Pass the CLI tool with its arguments
+            let mut args = self.config.tool_config.default_args.clone();
+            args.extend(self.config.tool_config.cli_args.clone());
+            (self.config.tool_config.cli_path.clone(), args)
+        };
+
+        // Build bw-relay command with optional socket (only in Filtered mode)
+        cmd.arg("/bw-relay");
+
+        // Add socket argument only if we're in proxy mode
+        if let NetworkMode::Filtered { .. } = &self.config.network_mode {
+            cmd.arg("--socket").arg("/proxy.sock");
         }
+
+        // Add separator and target command
+        cmd.arg("--");
+        cmd.arg(&target_binary);
+        cmd.args(&target_args);
 
         // Print debug info if verbose
         if self.config.verbose {
@@ -392,6 +421,7 @@ impl SandboxBuilder {
             if let Some(ref tmp_dir) = self.tmp_export_dir {
                 tracing::info!("Export /tmp: {}", tmp_dir.display());
             }
+            tracing::info!("Policy: {}", self.config.policy_name());
             tracing::info!(
                 "Network: {}",
                 match self.config.network_mode {

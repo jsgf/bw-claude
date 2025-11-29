@@ -31,6 +31,9 @@ pub enum ProxyError {
     #[error("Failed to parse config: {0}")]
     ConfigParse(#[from] toml::de::Error),
 
+    #[error("Config error: {0}")]
+    ConfigError(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

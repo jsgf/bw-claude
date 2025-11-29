@@ -3,7 +3,6 @@
 use super::schema::{HostGroup, NetworkConfig};
 use crate::error::{Result, ValidationError};
 use indexmap::IndexMap;
-use ipnet::{Ipv4Net, Ipv6Net};
 use std::collections::HashSet;
 
 pub struct ConfigValidator;
@@ -13,7 +12,6 @@ impl ConfigValidator {
     pub fn validate(network: &NetworkConfig) -> Result<()> {
         Self::check_cycles(network)?;
         Self::validate_references(network)?;
-        Self::validate_cidrs(network)?;
         Self::validate_patterns(network)?;
         Ok(())
     }
@@ -77,39 +75,6 @@ impl ConfigValidator {
             }
         }
 
-        // Check policy-to-group references
-        for (policy_name, policy) in &network.policies {
-            for ref_name in &policy.groups {
-                if !network.groups.contains_key(ref_name) {
-                    return Err(ValidationError::UnknownGroup {
-                        group: format!("policy {} -> {}", policy_name, ref_name),
-                    }
-                    .into());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Validate CIDR notation for IP ranges
-    fn validate_cidrs(network: &NetworkConfig) -> Result<()> {
-        for (group_name, group) in &network.groups {
-            // Validate IPv4 ranges
-            for cidr in &group.ipv4_ranges {
-                cidr.parse::<Ipv4Net>().map_err(|_| ValidationError::InvalidCidr {
-                    cidr: format!("{} in group {}", cidr, group_name),
-                })?;
-            }
-
-            // Validate IPv6 ranges
-            for cidr in &group.ipv6_ranges {
-                cidr.parse::<Ipv6Net>().map_err(|_| ValidationError::InvalidCidr {
-                    cidr: format!("{} in group {}", cidr, group_name),
-                })?;
-            }
-        }
-
         Ok(())
     }
 
@@ -154,8 +119,6 @@ mod tests {
                 description: "A".to_string(),
                 hosts: vec![],
                 hosts_deny: vec![],
-                ipv4_ranges: vec![],
-                ipv6_ranges: vec![],
                 groups: vec!["b".to_string()],
             },
         );
@@ -166,8 +129,6 @@ mod tests {
                 description: "B".to_string(),
                 hosts: vec![],
                 hosts_deny: vec![],
-                ipv4_ranges: vec![],
-                ipv6_ranges: vec![],
                 groups: vec![],
             },
         );
@@ -185,8 +146,6 @@ mod tests {
                 description: "A".to_string(),
                 hosts: vec![],
                 hosts_deny: vec![],
-                ipv4_ranges: vec![],
-                ipv6_ranges: vec![],
                 groups: vec!["b".to_string()],
             },
         );
@@ -197,8 +156,6 @@ mod tests {
                 description: "B".to_string(),
                 hosts: vec![],
                 hosts_deny: vec![],
-                ipv4_ranges: vec![],
-                ipv6_ranges: vec![],
                 groups: vec!["a".to_string()], // Cycle!
             },
         );
@@ -206,41 +163,4 @@ mod tests {
         assert!(ConfigValidator::check_cycles(&network).is_err());
     }
 
-    #[test]
-    fn test_validate_cidr() {
-        let mut network = NetworkConfig::default();
-
-        network.groups.insert(
-            "test".to_string(),
-            HostGroup {
-                description: "Test".to_string(),
-                hosts: vec![],
-                hosts_deny: vec![],
-                ipv4_ranges: vec!["192.168.1.0/24".to_string()],
-                ipv6_ranges: vec!["2001:db8::/32".to_string()],
-                groups: vec![],
-            },
-        );
-
-        assert!(ConfigValidator::validate_cidrs(&network).is_ok());
-    }
-
-    #[test]
-    fn test_invalid_cidr() {
-        let mut network = NetworkConfig::default();
-
-        network.groups.insert(
-            "test".to_string(),
-            HostGroup {
-                description: "Test".to_string(),
-                hosts: vec![],
-                hosts_deny: vec![],
-                ipv4_ranges: vec!["invalid".to_string()],
-                ipv6_ranges: vec![],
-                groups: vec![],
-            },
-        );
-
-        assert!(ConfigValidator::validate_cidrs(&network).is_err());
-    }
 }

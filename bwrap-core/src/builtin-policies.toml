@@ -1,0 +1,195 @@
+# Built-in network policies for bw-claude/bw-gemini
+# These are embedded in the binary and provide safe defaults
+# User config can override or extend these policies
+
+[common]
+config_version = "1.0"
+
+[network]
+
+# === Host Groups ===
+
+[network.groups.anthropic]
+description = "Anthropic Claude API and analytics"
+hosts = [
+    "api.anthropic.com",
+    "console.anthropic.com",
+    "statsig.anthropic.com",
+]
+
+[network.groups.gemini_apis]
+description = "Google Gemini API services"
+hosts = [
+    "oauth2.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+]
+
+[network.groups.localhost]
+description = "Local development servers"
+hosts = ["localhost"]
+
+[network.groups.rust]
+description = "Rust programming language resources"
+hosts = [
+    "crates.io",
+    "*.crates.io",
+    "docs.rs",
+    "*.docs.rs",
+]
+
+[network.groups.github]
+description = "Github"
+hosts = [
+    "github.com",
+    "*.github.com",
+]
+
+# === Filesystem Configurations ===
+
+[filesystem.configs.minimal]
+description = "Minimal filesystem access - essential system files only"
+ro_home_dirs = []
+essential_etc_files = [
+    "hostname",
+    "hosts",
+    "resolv.conf",
+    "passwd",
+    "group",
+    "timezone",
+    "localtime",
+]
+essential_etc_dirs = [
+    "pki",
+    "ssl",
+    "crypto-policies",
+    "terminfo",
+    "alternatives",
+]
+system_paths = ["/usr", "/lib", "/lib64"]
+
+[filesystem.configs.developer]
+description = "Standard developer environment"
+ro_home_dirs = [
+    ".local/share",
+    ".local/bin",
+    ".cargo",
+    ".rustup",
+    ".npm",
+    ".gem",
+    ".gradle",
+    ".m2",
+    ".nvm",
+    ".go",
+    ".gitconfig",
+    ".config/git",
+    ".config/nvim",
+    ".config/vim",
+    ".config/htop",
+    ".config/nano",
+    ".config/less",
+    ".config/lsd",
+    ".config/bat",
+    ".config/zsh",
+    ".config/bash",
+    ".config/fish",
+    ".config/alacritty",
+    ".config/kitty",
+]
+essential_etc_files = [
+    "hostname",
+    "hosts",
+    "resolv.conf",
+    "passwd",
+    "group",
+    "timezone",
+    "localtime",
+    "man_db.conf",
+]
+essential_etc_dirs = [
+    "pki",
+    "ssl",
+    "crypto-policies",
+    "terminfo",
+    "alternatives",
+]
+system_paths = ["/usr", "/lib", "/lib64"]
+
+[filesystem.configs.claude]
+extends = ["developer"]
+rw_home_dirs = [".claude"]
+rw_home_files = [".claude.json"]
+
+# === Policies ===
+
+[policy.policies.lockdown]
+description = "Complete isolation - no network, minimal filesystem"
+filesystem = "minimal"
+
+[policy.policies.lockdown.network]
+network = "disabled"
+default = "deny"
+
+[policy.policies.open]
+description = "Full network access, standard developer filesystem"
+filesystem = "developer"
+
+[policy.policies.open.network]
+network = "open"
+default = "allow"
+
+[policy.policies.allow]
+description = "Allow all through proxy, developer filesystem"
+filesystem = "developer"
+
+[policy.policies.allow.network]
+network = "proxy"
+default = "allow"
+
+[policy.policies.deny]
+description = "Block all through proxy, developer filesystem"
+filesystem = "developer"
+
+[policy.policies.deny.network]
+network = "proxy"
+default = "deny"
+
+[policy.policies.claude]
+description = "Claude-specific: Anthropic API only, developer filesystem"
+filesystem = "claude"
+
+[policy.policies.claude.network]
+network = "proxy"
+default = "deny"
+allow_groups = ["anthropic"]
+
+[policy.policies.gemini]
+description = "Gemini-specific: Google Gemini API only, developer filesystem"
+filesystem = "developer"
+
+[policy.policies.gemini.network]
+network = "proxy"
+default = "deny"
+allow_groups = ["gemini_apis"]
+
+[policy.policies.shell]
+description = "General shell use: Rust and GitHub access, developer filesystem"
+filesystem = "developer"
+
+[policy.policies.shell.network]
+network = "proxy"
+default = "deny"
+allow_groups = ["rust", "github"]
+
+# === Tool Configurations ===
+
+[tools.claude]
+enabled = true
+default_policy = "claude"
+
+[tools.gemini]
+enabled = true
+default_policy = "gemini"
+
+[tools.shell]
+enabled = true
+default_policy = "shell"

@@ -1,7 +1,8 @@
 //! Proxy server initialization and management
 
 use anyhow::{Context, Result};
-use bwrap_proxy::{ConfigLoader, LearningRecorder, PolicyEngine, ProxyServer, ProxyServerConfig};
+use bwrap_proxy::{PolicyEngine, ProxyServer, ProxyServerConfig};
+use crate::config::{Config, LearningRecorder, resolve_policy};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -10,16 +11,15 @@ use std::time::SystemTime;
 ///
 /// This function:
 /// 1. Generates a unique socket path in /tmp
-/// 2. Loads proxy configuration from file or uses defaults
-/// 3. Creates a PolicyEngine for the specified policy
-/// 4. Creates a LearningRecorder if learning_output is specified
-/// 5. Spawns the proxy server as a tokio task (runs until parent exits)
-/// 6. Waits for the proxy to be ready (listening on the socket)
-/// 7. Returns the socket path and learning mode (if active)
+/// 2. Creates a PolicyEngine for the specified policy (using already-loaded config)
+/// 3. Creates a LearningRecorder if learning_output is specified
+/// 4. Spawns the proxy server as a tokio task (runs until parent exits)
+/// 5. Waits for the proxy to be ready (listening on the socket)
+/// 6. Returns the socket path and learning mode (if active)
 ///
 /// Note: The proxy will save learning data on shutdown via a cleanup function
 pub async fn create_proxy_task(
-    config_path: &Option<PathBuf>,
+    config: &Config,
     policy_name: Option<&str>,
     learning_output: Option<&PathBuf>,
     learning_mode: Option<String>,
@@ -31,20 +31,25 @@ pub async fn create_proxy_task(
         .as_nanos();
     let socket_path = PathBuf::from(format!("/tmp/bw-proxy-{}.sock", session_id));
 
-    // Load configuration
-    let config = ConfigLoader::load_or_default(config_path.clone())
-        .context("Failed to load proxy configuration")?;
-
     // Create PolicyEngine if a policy name is specified
     let policy_engine = if let Some(policy_name) = policy_name {
-        match policy_name {
-            "open" => None, // "open" means no filtering
-            policy => {
-                Some(Arc::new(
-                    PolicyEngine::from_policy(policy, &config.network)
-                        .context(format!("Failed to load policy: {}", policy))?,
-                ))
-            }
+        let resolved_policy = resolve_policy(&config, policy_name)
+            .context(format!("Failed to load policy: {}", policy_name))?;
+
+        // Only create PolicyEngine if the policy requires filtering (Proxy mode with deny rules)
+        if matches!(resolved_policy.network.network, bwrap_proxy::config::NetworkMode::Proxy) {
+            Some(Arc::new(
+                PolicyEngine::from_network_policy(
+                    resolved_policy.network.effective_allow_groups(),
+                    resolved_policy.network.deny_groups.clone(),
+                    resolved_policy.network.default.clone(),
+                    &config.network,
+                )
+                .context(format!("Failed to initialize policy engine for: {}", policy_name))?,
+            ))
+        } else {
+            // For Open or Disabled network modes, no filtering engine needed
+            None
         }
     } else {
         None
@@ -75,11 +80,14 @@ pub async fn create_proxy_task(
     };
 
     // Create proxy server
+    let learning_recorder_trait: Option<Arc<dyn bwrap_proxy::filter::LearningRecorderTrait>> =
+        learning_recorder.as_ref().map(|lr| lr.clone() as Arc<dyn bwrap_proxy::filter::LearningRecorderTrait>);
+
     let proxy_config = ProxyServerConfig {
         socket_path: socket_path.clone(),
-        network_config: Arc::new(config.network),
+        network_config: Arc::new(config.network.clone()),
         policy_engine,
-        learning_recorder: learning_recorder.clone(),
+        learning_recorder: learning_recorder_trait,
         learning_output: learning_output.cloned(),
         learning_mode: learning_mode.clone(),
     };

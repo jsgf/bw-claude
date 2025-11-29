@@ -36,6 +36,12 @@ pub enum MountMode {
 
     /// Symlink
     Symlink { target: PathBuf },
+
+    /// /proc mount
+    Proc,
+
+    /// /dev bind mount
+    DevBind,
 }
 
 impl MountPoint {
@@ -95,6 +101,24 @@ impl MountPoint {
         }
     }
 
+    /// Mount /proc filesystem
+    pub fn proc() -> Self {
+        Self {
+            source: PathBuf::new(),
+            target: PathBuf::from("/proc"),
+            mode: MountMode::Proc,
+        }
+    }
+
+    /// Bind mount /dev filesystem
+    pub fn dev_bind() -> Self {
+        Self {
+            source: PathBuf::from("/dev"),
+            target: PathBuf::from("/dev"),
+            mode: MountMode::DevBind,
+        }
+    }
+
     /// Convert this mount point to bwrap command arguments
     pub fn to_args(&self) -> Vec<OsString> {
         match &self.mode {
@@ -129,6 +153,16 @@ impl MountPoint {
                 vec![
                     "--symlink".into(),
                     target.clone().into(),
+                    self.target.clone().into(),
+                ]
+            }
+            MountMode::Proc => {
+                vec!["--proc".into(), self.target.clone().into()]
+            }
+            MountMode::DevBind => {
+                vec![
+                    "--dev-bind".into(),
+                    self.source.clone().into(),
                     self.target.clone().into(),
                 ]
             }

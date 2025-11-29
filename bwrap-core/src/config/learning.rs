@@ -1,7 +1,10 @@
-use crate::config::loader::ConfigLoader;
-use crate::config::schema::{Config, HostGroup};
-use crate::error::{ProxyError, Result};
+use super::schema::Config;
+use super::loader::ConfigLoader;
+use crate::error::{Result, SandboxError};
+use bwrap_proxy::filter::LearningRecorderTrait;
+use bwrap_proxy::config::HostGroup;
 use chrono::Utc;
+use indexmap::IndexMap;
 use std::fs;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -54,8 +57,9 @@ impl LearningRecorder {
                 Config {
                     common: Default::default(),
                     network: Default::default(),
-                    claude: None,
-                    gemini: None,
+                    filesystem: Default::default(),
+                    policy: Default::default(),
+                    tools: IndexMap::new(),
                 }
             }
         };
@@ -78,8 +82,6 @@ impl LearningRecorder {
                     description: self.session_name.clone(),
                     hosts: Vec::new(),
                     hosts_deny: Vec::new(),
-                    ipv4_ranges: Vec::new(),
-                    ipv6_ranges: Vec::new(),
                     groups: Vec::new(),
                 });
 
@@ -90,35 +92,9 @@ impl LearningRecorder {
     }
 
     /// Record an IP access
-    pub fn record_ip(&self, ip: IpAddr) {
-        if let Ok(mut config) = self.config.lock() {
-            let group = config
-                .network
-                .groups
-                .entry(self.session_name.clone())
-                .or_insert_with(|| HostGroup {
-                    description: self.session_name.clone(),
-                    hosts: Vec::new(),
-                    hosts_deny: Vec::new(),
-                    ipv4_ranges: Vec::new(),
-                    ipv6_ranges: Vec::new(),
-                    groups: Vec::new(),
-                });
-
-            let ip_str = ip.to_string();
-            match ip {
-                IpAddr::V4(_) => {
-                    if !group.ipv4_ranges.contains(&ip_str) {
-                        group.ipv4_ranges.push(ip_str);
-                    }
-                }
-                IpAddr::V6(_) => {
-                    if !group.ipv6_ranges.contains(&ip_str) {
-                        group.ipv6_ranges.push(ip_str);
-                    }
-                }
-            }
-        }
+    /// Note: IP recording is no longer supported after removal of ipv4/v6 filtering
+    pub fn record_ip(&self, _ip: IpAddr) {
+        // No-op: IPs are no longer tracked after removal of IP range filtering
     }
 
     /// Record a connection (both host and IP if available)
@@ -141,8 +117,6 @@ impl LearningRecorder {
                     description: denied_group_name,
                     hosts: Vec::new(),
                     hosts_deny: Vec::new(),
-                    ipv4_ranges: Vec::new(),
-                    ipv6_ranges: Vec::new(),
                     groups: Vec::new(),
                 });
 
@@ -166,13 +140,12 @@ impl LearningRecorder {
 
         if let Some(path) = output_path {
             let config = self.config.lock()
-                .map_err(|_| ProxyError::Network("Failed to acquire config lock".to_string()))?;
+                .map_err(|_| SandboxError::ConfigError("Failed to acquire config lock".to_string()))?;
 
             let toml_str = toml::to_string_pretty(&*config)
-                .map_err(|e| ProxyError::Network(format!("Failed to serialize config: {e}")))?;
+                .map_err(|e| SandboxError::ConfigError(format!("Failed to serialize config: {e}")))?;
 
-            fs::write(&path, toml_str)
-                .map_err(ProxyError::from)?;
+            fs::write(&path, toml_str)?;
         }
 
         Ok(())
@@ -181,27 +154,13 @@ impl LearningRecorder {
     /// Get statistics about recorded data
     pub fn stats(&self) -> LearningStats {
         if let Ok(config) = self.config.lock() {
-            let mut host_count = 0;
-            let mut ipv4_count = 0;
-            let mut ipv6_count = 0;
+            let host_count = config.network.groups.get(&self.session_name)
+                .map(|g| g.hosts.len())
+                .unwrap_or(0);
 
-            if let Some(group) = config.network.groups.get(&self.session_name) {
-                host_count = group.hosts.len();
-                ipv4_count = group.ipv4_ranges.len();
-                ipv6_count = group.ipv6_ranges.len();
-            }
-
-            LearningStats {
-                host_count,
-                ipv4_count,
-                ipv6_count,
-            }
+            LearningStats { host_count }
         } else {
-            LearningStats {
-                host_count: 0,
-                ipv4_count: 0,
-                ipv6_count: 0,
-            }
+            LearningStats { host_count: 0 }
         }
     }
 
@@ -221,8 +180,9 @@ impl LearningRecorder {
                 Config {
                     common: Default::default(),
                     network: Default::default(),
-                    claude: None,
-                    gemini: None,
+                    filesystem: Default::default(),
+                    policy: Default::default(),
+                    tools: IndexMap::new(),
                 }
             }
         };
@@ -245,17 +205,38 @@ impl Default for LearningRecorder {
     }
 }
 
+impl LearningRecorderTrait for LearningRecorder {
+    fn record_host(&self, host: &str) {
+        LearningRecorder::record_host(self, host);
+    }
+
+    fn record_denied_host(&self, host: &str) {
+        LearningRecorder::record_denied_host(self, host);
+    }
+
+    fn record(&self, host: &str, ip: Option<IpAddr>) {
+        LearningRecorder::record(self, host, ip);
+    }
+
+    fn record_denied(&self, host: &str, ip: Option<IpAddr>) {
+        LearningRecorder::record_denied(self, host, ip);
+    }
+
+    fn flush(&self) -> std::result::Result<(), String> {
+        LearningRecorder::flush(self)
+            .map_err(|e| format!("Failed to flush learning recorder: {:?}", e))
+    }
+}
+
 /// Statistics about recorded learning data
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearningStats {
     pub host_count: usize,
-    pub ipv4_count: usize,
-    pub ipv6_count: usize,
 }
 
 impl LearningStats {
     pub fn total(&self) -> usize {
-        self.host_count + self.ipv4_count + self.ipv6_count
+        self.host_count
     }
 }
 
@@ -281,12 +262,12 @@ mod tests {
         let ipv4 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         let ipv6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
 
+        // IP recording is now a no-op since IP filtering was removed
         recorder.record_ip(ipv4);
         recorder.record_ip(ipv6);
 
         let stats = recorder.stats();
-        assert_eq!(stats.ipv4_count, 1);
-        assert_eq!(stats.ipv6_count, 1);
+        assert_eq!(stats.host_count, 0);
     }
 
     #[test]
@@ -305,14 +286,13 @@ mod tests {
     fn test_stats() {
         let recorder = LearningRecorder::new();
         recorder.record_host("example.com");
+        // IP recording is now a no-op since IP filtering was removed
         recorder.record_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
         recorder.record_ip(IpAddr::V6(Ipv6Addr::LOCALHOST));
 
         let stats = recorder.stats();
         assert_eq!(stats.host_count, 1);
-        assert_eq!(stats.ipv4_count, 1);
-        assert_eq!(stats.ipv6_count, 1);
-        assert_eq!(stats.total(), 3);
+        assert_eq!(stats.total(), 1);
     }
 
     #[test]
@@ -330,6 +310,7 @@ mod tests {
         // Record some data
         recorder.record_host("example.com");
         recorder.record_host("api.example.com");
+        // IP recording is now a no-op since IP filtering was removed
         recorder.record_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
 
         // Flush to file
@@ -340,7 +321,6 @@ mod tests {
         eprintln!("Flushed content:\n{content}");
         assert!(content.contains("example.com"), "Content missing example.com");
         assert!(content.contains("api.example.com"), "Content missing api.example.com");
-        assert!(content.contains("192.168.1.1"), "Content missing 192.168.1.1");
     }
 
     #[test]

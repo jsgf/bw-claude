@@ -1,6 +1,6 @@
 use crate::config::schema::NetworkConfig;
 use crate::error::Result;
-use crate::filter::{LearningRecorder, PolicyEngine};
+use crate::filter::{LearningRecorderTrait, PolicyEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -8,7 +8,6 @@ use tracing::{debug, info};
 
 /// Policy filtering proxy server configuration
 /// Communicates with bw-relay via a simple text protocol over Unix Domain Socket
-#[derive(Clone)]
 pub struct ProxyServerConfig {
     /// Unix domain socket path to listen on
     pub socket_path: PathBuf,
@@ -16,13 +15,26 @@ pub struct ProxyServerConfig {
     pub network_config: Arc<NetworkConfig>,
     /// Policy engine for evaluation
     pub policy_engine: Option<Arc<PolicyEngine>>,
-    /// Learning recorder for learning mode
-    pub learning_recorder: Option<Arc<LearningRecorder>>,
+    /// Learning recorder for learning mode (trait object to avoid circular dependency)
+    pub learning_recorder: Option<Arc<dyn LearningRecorderTrait>>,
     /// Optional path to save learning data on shutdown
     pub learning_output: Option<PathBuf>,
     /// Learning mode type: "learn" (record all access) or "learn_deny" (record denied access)
     /// None if not in learning mode
     pub learning_mode: Option<String>,
+}
+
+impl Clone for ProxyServerConfig {
+    fn clone(&self) -> Self {
+        Self {
+            socket_path: self.socket_path.clone(),
+            network_config: Arc::clone(&self.network_config),
+            policy_engine: self.policy_engine.as_ref().map(Arc::clone),
+            learning_recorder: self.learning_recorder.as_ref().map(Arc::clone),
+            learning_output: self.learning_output.clone(),
+            learning_mode: self.learning_mode.clone(),
+        }
+    }
 }
 
 /// Policy filtering proxy server

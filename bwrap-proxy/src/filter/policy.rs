@@ -1,10 +1,9 @@
 //! Policy engine for evaluating network access
 
 use super::matcher::HostMatcher;
-use crate::config::schema::{HostGroup, NetworkConfig};
+use crate::config::schema::{DefaultMode, HostGroup, NetworkConfig};
 use crate::error::{ProxyError, Result};
 use indexmap::IndexMap;
-use ipnet::{Ipv4Net, Ipv6Net};
 use std::collections::HashSet;
 use std::net::IpAddr;
 
@@ -18,35 +17,32 @@ pub struct PolicyEngine {
 }
 
 impl PolicyEngine {
-    /// Create a policy engine from a named policy
-    pub fn from_policy(policy_name: &str, network: &NetworkConfig) -> Result<Self> {
-        let policy = network
-            .policies
-            .get(policy_name)
-            .ok_or_else(|| ProxyError::PolicyNotFound {
-                policy: policy_name.to_string(),
-            })?;
-
+    /// Create a policy engine from allow/deny groups and default mode
+    pub fn from_network_policy(
+        allow_groups: Vec<String>,
+        deny_groups: Vec<String>,
+        default: DefaultMode,
+        network_config: &NetworkConfig,
+    ) -> Result<Self> {
         let mut allow_matcher = HostMatcher::new();
         let mut deny_matcher = HostMatcher::new();
         let mut processed = HashSet::new();
 
         // Recursively expand all groups referenced by the policy's allow groups
-        // Use effective_allow_groups() which handles backward compatibility
-        for group_name in &policy.effective_allow_groups() {
-            Self::expand_group(group_name, &network.groups, &mut allow_matcher, &mut processed)?;
+        for group_name in &allow_groups {
+            Self::expand_group(group_name, &network_config.groups, &mut allow_matcher, &mut processed)?;
         }
 
         // Recursively expand all groups referenced by the policy's deny groups
         processed.clear();
-        for group_name in &policy.deny_groups {
-            Self::expand_group_deny(group_name, &network.groups, &mut deny_matcher, &mut processed)?;
+        for group_name in &deny_groups {
+            Self::expand_group_deny(group_name, &network_config.groups, &mut deny_matcher, &mut processed)?;
         }
 
         Ok(Self {
             allow_matcher,
             deny_matcher,
-            default: policy.default.clone(),
+            default,
         })
     }
 
@@ -71,22 +67,6 @@ impl PolicyEngine {
         // Add allow host patterns
         for host in &group.hosts {
             matcher.add_pattern(host);
-        }
-
-        // Add IPv4 ranges
-        for range_str in &group.ipv4_ranges {
-            let range = range_str
-                .parse::<Ipv4Net>()
-                .map_err(|e| ProxyError::Network(format!("Invalid IPv4 range {}: {}", range_str, e)))?;
-            matcher.add_ipv4_range(range);
-        }
-
-        // Add IPv6 ranges
-        for range_str in &group.ipv6_ranges {
-            let range = range_str
-                .parse::<Ipv6Net>()
-                .map_err(|e| ProxyError::Network(format!("Invalid IPv6 range {}: {}", range_str, e)))?;
-            matcher.add_ipv6_range(range);
         }
 
         // Recursively expand referenced groups
@@ -132,8 +112,6 @@ impl PolicyEngine {
     /// Uses "longest match" logic: when both allow and deny rules match,
     /// the one with highest specificity wins. On a tie, deny wins.
     pub fn allow(&self, host: &str, ip: Option<IpAddr>) -> bool {
-        use crate::config::schema::DefaultMode;
-
         // Check hostname specificity for both allow and deny matchers
         let allow_hostname_spec = self.allow_matcher.matches_with_specificity(host);
         let deny_hostname_spec = self.deny_matcher.matches_with_specificity(host);
@@ -174,144 +152,5 @@ impl PolicyEngine {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::schema::{HostGroup, NetworkConfig, Policy, DefaultMode, NetworkMode};
-
-    fn create_test_network() -> NetworkConfig {
-        let mut network = NetworkConfig::default();
-
-        // Create some test groups
-        network.groups.insert(
-            "anthropic".to_string(),
-            HostGroup {
-                description: "Anthropic".to_string(),
-                hosts: vec!["*.anthropic.com".to_string(), "*.claude.ai".to_string()],
-                hosts_deny: vec![],
-                ipv4_ranges: vec![],
-                ipv6_ranges: vec![],
-                groups: vec![],
-            },
-        );
-
-        network.groups.insert(
-            "google".to_string(),
-            HostGroup {
-                description: "Google".to_string(),
-                hosts: vec!["*.google.com".to_string()],
-                hosts_deny: vec![],
-                ipv4_ranges: vec!["142.250.0.0/15".to_string()],
-                ipv6_ranges: vec![],
-                groups: vec![],
-            },
-        );
-
-        // Create a policy
-        network.policies.insert(
-            "claude_default".to_string(),
-            Policy {
-                description: "Default Claude policy".to_string(),
-                allow_groups: vec!["anthropic".to_string(), "google".to_string()],
-                deny_groups: vec![],
-                groups: vec![],
-                network: NetworkMode::Proxy,
-                default: DefaultMode::Deny,
-            },
-        );
-
-        network.policies.insert(
-            "allow".to_string(),
-            Policy {
-                description: "Allow all".to_string(),
-                allow_groups: vec![],
-                deny_groups: vec![],
-                groups: vec![],
-                network: NetworkMode::Proxy,
-                default: DefaultMode::Allow,
-            },
-        );
-
-        network
-    }
-
-    #[test]
-    fn test_policy_engine_from_policy() {
-        let network = create_test_network();
-        let engine = PolicyEngine::from_policy("claude_default", &network).unwrap();
-
-        assert!(engine.allow("api.anthropic.com", None));
-        assert!(engine.allow("console.claude.ai", None));
-        assert!(engine.allow("www.google.com", None));
-        assert!(!engine.allow("www.example.com", None));
-    }
-
-    #[test]
-    fn test_allow_all_policy() {
-        let network = create_test_network();
-        let engine = PolicyEngine::from_policy("allow", &network).unwrap();
-
-        assert!(engine.allow("anything.com", None));
-        assert!(engine.allow("example.org", None));
-    }
-
-    #[test]
-    fn test_policy_not_found() {
-        let network = create_test_network();
-        let result = PolicyEngine::from_policy("nonexistent", &network);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_group_composition() {
-        let mut network = NetworkConfig::default();
-
-        // Create groups that reference each other
-        network.groups.insert(
-            "base".to_string(),
-            HostGroup {
-                description: "Base".to_string(),
-                hosts: vec!["*.base.com".to_string()],
-                hosts_deny: vec![],
-                ipv4_ranges: vec![],
-                ipv6_ranges: vec![],
-                groups: vec![],
-            },
-        );
-
-        network.groups.insert(
-            "extended".to_string(),
-            HostGroup {
-                description: "Extended".to_string(),
-                hosts: vec!["*.extended.com".to_string()],
-                hosts_deny: vec![],
-                ipv4_ranges: vec![],
-                ipv6_ranges: vec![],
-                groups: vec!["base".to_string()],
-            },
-        );
-
-        network.policies.insert(
-            "test".to_string(),
-            Policy {
-                description: "Test".to_string(),
-                allow_groups: vec!["extended".to_string()],
-                deny_groups: vec![],
-                groups: vec![],
-                network: NetworkMode::Proxy,
-                default: DefaultMode::Deny,
-            },
-        );
-
-        let engine = PolicyEngine::from_policy("test", &network).unwrap();
-
-        // Should match both base and extended
-        assert!(engine.allow("api.base.com", None));
-        assert!(engine.allow("api.extended.com", None));
-        assert!(!engine.allow("api.other.com", None));
     }
 }
